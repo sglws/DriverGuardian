@@ -48,8 +48,10 @@ DriverGuardian/
 │   ├── train/ valid/ test/
 │   └── data.yaml
 ├── models/
-│   ├── yolo11n.pt          # pretrained (move your existing file here)
-│   └── best.pt              # your fine-tuned model (after Phase 11)
+│   ├── yolo11n.pt                       # pretrained (move your existing file here)
+│   ├── best.pt                          # your fine-tuned model (after Phase 11)
+│   ├── face_landmarker.task             # MediaPipe Tasks API - Face Mesh (committed, no setup needed)
+│   └── blaze_face_short_range.tflite    # MediaPipe Tasks API - presence detection (committed)
 ├── training/
 │   ├── train.py            # Phase 11: fine-tune YOLO
 │   ├── evaluate.py         # Phase 12: precision/recall/mAP50
@@ -68,7 +70,16 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-Move your existing `yolo11n.pt` into `models/`.
+Move your existing `yolo11n.pt` into `models/` (the two MediaPipe Tasks
+models are already committed in `models/`, nothing to do there).
+
+On a fresh aarch64/ARM64 install (e.g. Raspberry Pi), pip may resolve
+`mediapipe` to a different version than on x86_64 - both `0.10.14+` and
+`1.0.0+` work fine here, since the app uses the `mp.tasks.vision` API rather
+than the legacy `mp.solutions` API that `1.0.0` removed. If you're on
+PyTorch's CUDA build by mistake (common on Linux aarch64, since Raspberry Pi
+has no NVIDIA GPU at all), install the CPU-only wheel explicitly first:
+`pip install torch --index-url https://download.pytorch.org/whl/cpu`.
 
 ## Running
 

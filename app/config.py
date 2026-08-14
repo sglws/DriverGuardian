@@ -18,6 +18,13 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 YOLO_PRETRAINED_PATH = os.path.join(MODELS_DIR, "yolo11n.pt")   # Phase 8 (COCO pretrained)
 YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (your custom classes)
 
+# MediaPipe Tasks API models (Phases 2-3). Required since mediapipe 1.0.0
+# removed the old bundled-model mp.solutions API - these are downloaded once
+# from Google's official model bucket and committed to the repo (both are
+# a few MB, same as yolo11n.pt).
+FACE_LANDMARKER_MODEL_PATH = os.path.join(MODELS_DIR, "face_landmarker.task")
+FACE_DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "blaze_face_short_range.tflite")
+
 # --------------------------------------------------------------------------
 # Camera (Phase 1)
 # --------------------------------------------------------------------------
