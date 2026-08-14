@@ -1,0 +1,25 @@
+# DriverGuardian custom dataset config (Phases 9-10)
+#
+# After collecting and annotating images in Roboflow or CVAT, export in
+# YOLO format and place files here:
+#   datasets/train/images, datasets/train/labels
+#   datasets/valid/images, datasets/valid/labels
+#   datasets/test/images,  datasets/test/labels
+#
+# Then fill in the paths/class names below to match your export exactly.
+
+train: train/images
+val: valid/images
+test: test/images
+
+nc: 5   # number of classes - update if you add/remove classes
+names:
+  0: phone
+  1: seatbelt_off
+  2: cigarette
+  3: food
+  4: drink
+
+# NOTE: yolo_detector.py matches class names by substring (case-insensitive),
+# e.g. "seatbelt_off" -> seatbelt_off = True. Keep names close to these or
+# update the matching logic in app/yolo_detector.py to match your final names.

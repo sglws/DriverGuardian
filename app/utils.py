@@ -1,0 +1,102 @@
+"""
+utils.py
+--------
+Small shared helper functions used across modules.
+"""
+
+import time
+import cv2
+import numpy as np
+
+
+def euclidean(p1, p2):
+    """Euclidean distance between two (x, y) points."""
+    return float(np.linalg.norm(np.array(p1) - np.array(p2)))
+
+
+def timestamp() -> str:
+    return time.strftime("%H:%M:%S")
+
+
+def clamp(value, lo, hi):
+    return max(lo, min(hi, value))
+
+
+def frame_std_dev(gray_frame) -> float:
+    """Grayscale standard deviation - near-zero means a near-uniform, out-of-
+    focus image. Covers both a physically covered lens AND a hand/object
+    held close to the camera (which produces the same low-texture blob)."""
+    return float(np.std(gray_frame))
+
+
+def frame_mean_brightness(gray_frame) -> float:
+    """Mean grayscale brightness, used to decide when low-light enhancement
+    is worth applying (a legitimately dark night cabin, not a covered lens)."""
+    return float(np.mean(gray_frame))
+
+
+def enhance_low_light(bgr_frame):
+    """CLAHE contrast enhancement on the luma channel. Improves MediaPipe
+    landmark/eye/head-pose accuracy at night on a plain RGB sensor, without
+    the noise amplification of a naive brightness/gain boost."""
+    lab = cv2.cvtColor(bgr_frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge((l, a, b)), cv2.COLOR_LAB2BGR)
+
+
+class Hysteresis:
+    """Symmetric debounce: a boolean condition only flips the reported state
+    after it has held steadily for a confirmation window - `confirm_in` to
+    enter the "bad" state, `confirm_out` to leave it. This makes state
+    transitions robust in both directions: a single bad frame can't cause a
+    false escalation, and a single good frame can't prematurely clear an
+    ongoing real condition.
+    """
+
+    def __init__(self, confirm_in: float, confirm_out: float, initial: bool = False):
+        self.confirm_in = confirm_in
+        self.confirm_out = confirm_out
+        self.state = initial
+        self._since = None  # timestamp the opposite-of-state condition started
+
+    def update(self, condition: bool, now: float) -> bool:
+        """`condition` is the raw, unsmoothed reading for this frame.
+        Returns the debounced state."""
+        target_delay = self.confirm_in if condition else self.confirm_out
+        if condition != self.state:
+            if self._since is None:
+                self._since = now
+            elif now - self._since >= target_delay:
+                self.state = condition
+                self._since = None
+        else:
+            self._since = None
+        return self.state
+
+    def reset(self, state: bool = False):
+        self.state = state
+        self._since = None
+
+
+def mouth_roi(landmarks, w, h, radius_mult=3.5):
+    """Returns (cx, cy, radius) in pixel coords for a circular region around
+    the mouth, scaled up to cover an object (cup, food, cigarette) held near
+    it - not just the lips themselves."""
+    left = landmarks[61]
+    right = landmarks[291]
+    top = landmarks[13]
+    bottom = landmarks[14]
+    cx = (left.x + right.x + top.x + bottom.x) / 4.0 * w
+    cy = (left.y + right.y + top.y + bottom.y) / 4.0 * h
+    mouth_width = euclidean((left.x * w, left.y * h), (right.x * w, right.y * h))
+    radius = max(mouth_width * radius_mult, 1.0)
+    return cx, cy, radius
+
+
+def box_near_point(box, cx, cy, radius) -> bool:
+    """True if a YOLO box's center falls within `radius` of (cx, cy)."""
+    x1, y1, x2, y2 = box[:4]
+    bx, by = (x1 + x2) / 2.0, (y1 + y2) / 2.0
+    return euclidean((bx, by), (cx, cy)) <= radius

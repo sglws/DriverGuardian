@@ -1,0 +1,43 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# --- Virtual environment ---
+.venv/
+venv/
+env/
+
+# --- IDE / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Runtime artifacts (regenerated every run, not useful in history) ---
+logs/*.csv
+outputs/*
+!outputs/.gitkeep
+
+# --- Training artifacts (large, fully regenerable from the dataset) ---
+training/runs/
+
+# --- Dataset images/labels: can grow to thousands of files (Phase 9-10) -
+# use Roboflow/DVC/Git LFS for these instead of committing raw data. Keep
+# the folder structure and data.yaml tracked.
+datasets/train/images/*
+datasets/train/labels/*
+datasets/valid/images/*
+datasets/valid/labels/*
+datasets/test/images/*
+datasets/test/labels/*
+!datasets/**/.gitkeep
+
+# --- Model weights: keep the small pretrained baseline, ignore fine-tuned/
+# retrainable weights (regenerable via training/train.py from the dataset) ---
+models/*.pt
+!models/yolo11n.pt
