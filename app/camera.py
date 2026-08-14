@@ -2,27 +2,65 @@
 camera.py
 ---------
 Phase 1 deliverable: verified live camera capture.
-Thin wrapper around cv2.VideoCapture so main.py doesn't deal with raw OpenCV.
+
+Two backends, auto-selected:
+- picamera2 (libcamera) - required for Raspberry Pi CSI ribbon-cable
+  cameras (e.g. the imx219 family). OpenCV has no libcamera support at
+  all (confirmed upstream: https://github.com/opencv/opencv/issues/22820),
+  so on a Pi 5 - which dropped the legacy V4L2 camera stack entirely -
+  cv2.VideoCapture(index) will open successfully but every read() fails.
+- cv2.VideoCapture (V4L2) - USB webcams, and non-Pi dev machines where
+  picamera2 isn't installed (it depends on system libcamera bindings that
+  don't exist off-Pi, so it's never a pip dependency of this project).
 """
 
 import cv2
 from app import config
 
+try:
+    from picamera2 import Picamera2
+    _PICAMERA2_AVAILABLE = True
+except ImportError:
+    _PICAMERA2_AVAILABLE = False
+
 
 class Camera:
     def __init__(self, index=config.CAMERA_INDEX,
                  width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT):
-        self.cap = cv2.VideoCapture(index)
-        if not self.cap.isOpened():
-            raise RuntimeError(
-                f"Camera not found at index {index}. "
-                f"Check connection or try a different index."
+        self.using_picamera2 = _PICAMERA2_AVAILABLE
+
+        if self.using_picamera2:
+            self.picam2 = Picamera2()
+            # NOTE: picamera2's "RGB888" format is a legacy/misleading name -
+            # capture_array() actually returns BGR-ordered bytes for it,
+            # which is exactly what OpenCV/this codebase expects. Do NOT
+            # add a cv2.cvtColor(..., COLOR_RGB2BGR) here; that would
+            # re-flip already-correct channels. See:
+            # https://github.com/raspberrypi/picamera2/issues/260
+            video_config = self.picam2.create_video_configuration(
+                main={"size": (width, height), "format": "RGB888"}
             )
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            self.picam2.configure(video_config)
+            self.picam2.start()
+            print(f"[camera] Using picamera2 (libcamera) at {width}x{height}")
+        else:
+            self.cap = cv2.VideoCapture(index)
+            if not self.cap.isOpened():
+                raise RuntimeError(
+                    f"Camera not found at index {index}. "
+                    f"Check connection or try a different index."
+                )
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
+            print(f"[camera] Using cv2.VideoCapture (V4L2) at index {index}")
 
     def read(self):
         """Returns (success, mirrored_bgr_frame)."""
+        if self.using_picamera2:
+            frame = self.picam2.capture_array()
+            frame = cv2.flip(frame, 1)  # mirror for natural selfie-view
+            return True, frame
+
         ret, frame = self.cap.read()
         if not ret:
             return False, None
@@ -30,7 +68,10 @@ class Camera:
         return True, frame
 
     def release(self):
-        self.cap.release()
+        if self.using_picamera2:
+            self.picam2.stop()
+        else:
+            self.cap.release()
 
     def __enter__(self):
         return self

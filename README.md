@@ -81,6 +81,34 @@ PyTorch's CUDA build by mistake (common on Linux aarch64, since Raspberry Pi
 has no NVIDIA GPU at all), install the CPU-only wheel explicitly first:
 `pip install torch --index-url https://download.pytorch.org/whl/cpu`.
 
+### Raspberry Pi + CSI camera (ribbon cable, e.g. imx219)
+
+OpenCV has no libcamera support at all, and Pi 5 dropped the legacy V4L2
+camera stack entirely - so `cv2.VideoCapture` cannot read frames from a CSI
+camera on a Pi 5 (it'll open, but every read fails). `camera.py` auto-detects
+and uses `picamera2` (libcamera-based) instead when it's importable, falling
+back to `cv2.VideoCapture` otherwise (USB webcams, or this repo's own
+non-Pi dev environment). `picamera2` depends on system libcamera bindings
+that only exist on Pi OS, so it's never a pip/requirements.txt dependency -
+get it visible inside your venv like this:
+
+```bash
+python3 -c "import picamera2"                  # check if it's already installed system-wide
+sudo apt update && sudo apt install -y python3-picamera2   # if the above failed
+```
+
+Then let your existing venv see it (recreating the venv isn't necessary -
+just flip the flag in its config):
+
+```bash
+sed -i 's/include-system-site-packages = false/include-system-site-packages = true/' .venv/pyvenv.cfg
+source .venv/bin/activate
+python -c "from picamera2 import Picamera2; print('picamera2 OK')"
+```
+
+If you're on a USB webcam instead, none of this is needed - `cv2.VideoCapture`
+already handles it.
+
 ## Running
 
 ```bash
