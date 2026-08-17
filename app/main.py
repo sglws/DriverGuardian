@@ -26,6 +26,7 @@ from app.camera import Camera
 from app.face_detector import PresenceDetector
 from app.face_mesh import FaceMeshWrapper
 from app.eye_tracker import EyeTracker
+from app.mouth_tracker import MouthTracker
 from app.drowsiness import DrowsinessDetector, DrowsinessLevel
 from app.head_pose import estimate_pose, HeadPoseTracker
 from app.yolo_detector import YoloDetector, DetectionConfirmer
@@ -46,8 +47,8 @@ def setup_csv_logger():
     f = open(path, "w", newline="")
     writer = csv.writer(f)
     writer.writerow(["timestamp", "risk", "score", "eye_closed", "closed_elapsed",
-                      "blink_rate", "pitch_delta", "yaw_delta", "phone", "drink",
-                      "food", "seatbelt_off", "messages"])
+                      "blink_rate", "mouth_open", "total_yawns", "pitch_delta", "yaw_delta",
+                      "phone", "drink", "food", "seatbelt_off", "messages"])
     return f, writer, path
 
 
@@ -58,6 +59,7 @@ def main():
     presence_detector = PresenceDetector()
     face_mesh = FaceMeshWrapper()
     eye_tracker = EyeTracker()
+    mouth_tracker = MouthTracker()
     drowsiness = DrowsinessDetector()
     head_pose_tracker = HeadPoseTracker()
     yolo = YoloDetector()
@@ -78,7 +80,7 @@ def main():
     # ---- Calibration state ----
     calibrating = True
     calibration_start = None
-    calib_ear, calib_pitch, calib_yaw = [], [], []
+    calib_ear, calib_mar, calib_pitch, calib_yaw = [], [], [], []
 
     prev_time = time.time()
     last_console_log = 0.0
@@ -116,9 +118,10 @@ def main():
             landmarks, drawable = face_mesh.process(rgb_frame)
             face_found = landmarks is not None
 
-            smoothed_ear, pitch, yaw = 0.30, 0.0, 0.0
+            smoothed_ear, smoothed_mar, pitch, yaw = 0.30, 0.5, 0.0, 0.0
             if face_found:
                 smoothed_ear = eye_tracker.update(landmarks, w, h)
+                smoothed_mar = mouth_tracker.update(landmarks, w, h)
                 p, y_, _ = estimate_pose(landmarks, w, h)
                 if p is not None:
                     pitch, yaw = p, y_
@@ -130,19 +133,22 @@ def main():
                     if calibration_start is None:
                         calibration_start = now
                     calib_ear.append(smoothed_ear)
+                    calib_mar.append(smoothed_mar)
                     calib_pitch.append(pitch)
                     calib_yaw.append(yaw)
                     elapsed = now - calibration_start
-                    cv2.putText(frame, f"CALIBRATING... look straight ahead ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
+                    cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
                         baseline_ear = float(np.median(calib_ear))
+                        baseline_mar = float(np.median(calib_mar))
                         baseline_pitch = float(np.median(calib_pitch))
                         baseline_yaw = float(np.median(calib_yaw))
                         drowsiness.set_baseline(baseline_ear)
+                        drowsiness.set_mouth_baseline(baseline_mar)
                         head_pose_tracker.set_baseline(baseline_pitch, baseline_yaw)
                         calibrating = False
-                        print(f"Calibration done. EAR={baseline_ear:.3f} "
+                        print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
                 else:
                     cv2.putText(frame, "Waiting for face to calibrate...",
@@ -173,7 +179,7 @@ def main():
 
            # ---- Run detection pipelines ----
             pose_state = head_pose_tracker.update(pitch, yaw, now)
-            drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"])
+            drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"], smoothed_mar)
 
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
@@ -206,6 +212,13 @@ def main():
 
                 f"Blinks/{config.BLINK_WINDOW_SEC:.0f}s: {drowsy_state['blink_rate']}  "
                 f"Total: {drowsy_state['total_blinks']}",
+
+                f"Mouth: {'OPEN' if drowsy_state['mouth_open'] else 'CLOSED'}  "
+                f"MAR={smoothed_mar:.2f} (thr>{drowsiness.open_mouth_threshold:.2f})  "
+                f"open {drowsy_state['open_elapsed']:.1f}s  "
+                f"Yawns/{config.YAWN_RATE_WINDOW_SEC:.0f}s: {drowsy_state['yawn_rate']}  "
+                f"Total: {drowsy_state['total_yawns']}"
+                f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
 
                 f"YOLO: phone={yolo_state['phone']} drink={yolo_state['drink']} "
                 f"food={yolo_state['food']} seatbelt_off={yolo_state['seatbelt_off']} "
@@ -246,7 +259,8 @@ def main():
                 csv_writer.writerow([
                     utils.timestamp(), risk.name, debug.get("score"),
                     drowsy_state["eye_closed"], f"{drowsy_state['closed_elapsed']:.2f}",
-                    drowsy_state["blink_rate"], f"{pose_state['pitch_delta']:.1f}",
+                    drowsy_state["blink_rate"], drowsy_state["mouth_open"], drowsy_state["total_yawns"],
+                    f"{pose_state['pitch_delta']:.1f}",
                     f"{pose_state['yaw_delta']:.1f}", yolo_state["phone"], yolo_state["drink"],
                     yolo_state["food"], yolo_state["seatbelt_off"], " / ".join(messages),
                 ])
@@ -260,9 +274,11 @@ def main():
                 calibrating = True
                 calibration_start = None
                 calib_ear.clear()
+                calib_mar.clear()
                 calib_pitch.clear()
                 calib_yaw.clear()
                 eye_tracker.reset()
+                mouth_tracker.reset()
                 drowsiness.reset()
                 presence_hysteresis.reset()
                 obstruction_hysteresis.reset()
