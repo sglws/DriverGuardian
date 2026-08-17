@@ -64,8 +64,11 @@ class DrowsinessDetector:
 
         `smoothed_mar` is the calibrated-relative Mouth Aspect Ratio (see
         mouth_tracker.py) - a sustained wide-open mouth (a yawn, not talking
-        or a brief word) feeds into the same DROWSY tier as eye closure /
-        excessive blinking below, so it needs no changes to risk_engine.py.
+        or a brief word) is tracked here but deliberately kept OUT of
+        `level` below: a yawn alone is a much weaker signal than sustained
+        eye closure or a high blink rate (people yawn from boredom/habit,
+        not just fatigue), so it's scored as its own LOW-risk contribution
+        in risk_engine.py rather than being folded into DROWSY/MEDIUM.
         """
         looking_down = pitch_delta >= config.EAR_SUPPRESS_PITCH_DOWN_DEG
         eye_closed = smoothed_ear < self.closed_threshold and not looking_down
@@ -109,14 +112,11 @@ class DrowsinessDetector:
         is_yawning = mouth_open and open_elapsed >= config.YAWN_MIN_DURATION_SEC
         yawn_rate = len(self.yawn_timestamps)
 
-        # ---- Phase 6 rules ----
+        # ---- Phase 6 rules (eye/blink only - yawning is scored separately, see above) ----
         blink_rate = len(self.blink_timestamps)
         if closed_elapsed >= config.EAR_SLEEPING_SEC:
             level = DrowsinessLevel.SLEEPING
-        elif (closed_elapsed >= config.EAR_MICROSLEEP_SEC
-                or blink_rate >= config.BLINK_RATE_DROWSY_THRESHOLD
-                or is_yawning
-                or yawn_rate >= config.YAWN_RATE_DROWSY_THRESHOLD):
+        elif closed_elapsed >= config.EAR_MICROSLEEP_SEC or blink_rate >= config.BLINK_RATE_DROWSY_THRESHOLD:
             level = DrowsinessLevel.DROWSY
         else:
             level = DrowsinessLevel.SAFE

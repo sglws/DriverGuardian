@@ -59,8 +59,8 @@ BLINK_RATE_DROWSY_THRESHOLD = 6  # blinks within window considered excessive/dro
 MAR_SMOOTHING_FRAMES = 3
 MAR_YAWN_RATIO = 1.8            # mouth counted "open" once MAR exceeds this multiple of baseline
 YAWN_MIN_DURATION_SEC = 1.5     # must stay open this long to count as a yawn, not talking/a word
-YAWN_RATE_WINDOW_SEC = 60.0     # window for counting repeated yawns
-YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a drowsiness signal
+YAWN_RATE_WINDOW_SEC = 10.0     # window for counting repeated yawns
+YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still LOW-risk) signal
 
 # --------------------------------------------------------------------------
 # Head pose thresholds (Phase 7)

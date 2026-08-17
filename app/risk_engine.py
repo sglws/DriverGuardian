@@ -86,6 +86,15 @@ class RiskEngine:
             score += 2
             messages.append("Voice warning + Seat vibration + Reduce speed 50%")
 
+        # Yawning: a weaker fatigue signal than sustained eye closure or a
+        # high blink rate (people yawn from boredom/habit too), so it's its
+        # own LOW-risk floor rather than folded into the DROWSY score above -
+        # it still combines with other simultaneous conditions to escalate
+        # further, same as everything else in this scored section.
+        if drowsiness_state["is_yawning"] or drowsiness_state["yawn_rate"] >= config.YAWN_RATE_DROWSY_THRESHOLD:
+            score += config.SCORE_LOW_MIN
+            messages.append('Audio: "You look tired - consider taking a break."')
+
         # Case 2 (head resting on hand / leaning): MEDIUM the moment leaning
         # is CONFIRMED (debounced - not a single noisy frame), independent of
         # the eye-closure signal above. The recheck block above escalates
