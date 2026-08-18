@@ -37,7 +37,12 @@ datasets/test/images/*
 datasets/test/labels/*
 !datasets/**/.gitkeep
 
-# --- Model weights: keep the small pretrained baseline, ignore fine-tuned/
-# retrainable weights (regenerable via training/train.py from the dataset) ---
+# --- Model weights: keep the small pretrained baseline and the current
+# deployed fine-tuned model - the dataset that trained best.pt isn't in this
+# repo (see datasets/ rules above), so it's not actually regenerable from
+# what's here; committing it (it's small, ~5MB) is what keeps a fresh clone
+# actually functional. Ignore other/future .pt files (retraining experiments,
+# checkpoints) so those don't get committed by accident. ---
 models/*.pt
 !models/yolo11n.pt
+!models/best.pt

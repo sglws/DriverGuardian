@@ -52,7 +52,7 @@ DriverGuardian/
 │   └── data.yaml
 ├── models/
 │   ├── yolo11n.pt                       # pretrained (move your existing file here)
-│   ├── best.pt                          # your fine-tuned model (after Phase 11)
+│   ├── best.pt                          # fine-tuned (Phase 11): Drinking/Eating/Phone/Seatbelt/Smoking
 │   ├── face_landmarker.task             # MediaPipe Tasks API - Face Mesh (committed, no setup needed)
 │   └── blaze_face_short_range.tflite    # MediaPipe Tasks API - presence detection (committed)
 ├── training/
@@ -207,33 +207,35 @@ python -m app.main
 | 8 | YOLO pretrained sanity check | Done (uses COCO classes as an approximation) |
 | 9 | Dataset collection | **Your task** - not automatable |
 | 10 | Annotation (Roboflow/CVAT) | **Your task** |
-| 11 | Fine-tune YOLO | Script ready (`training/train.py`) - needs your dataset |
-| 12 | YOLO evaluation | Script ready (`training/evaluate.py`) |
+| 11 | Fine-tune YOLO | Done - `models/best.pt` trained (Drinking/Eating/Phone/Seatbelt/Smoking) |
+| 12 | YOLO evaluation | Script ready (`training/evaluate.py`) - run it to check per-class mAP/precision/recall |
 | 13 | Risk engine | Done - scored, supports combined-condition escalation |
 | 14 | Alert system | Done - voice/TTS + real ESP32 Bluetooth link (`alerts.py`, `esp32/`) |
 | 15 | Raspberry Pi optimization | Export script ready (`training/export.py`); test FPS on-device |
 
-## Why "seatbelt" and "cigarette" show as `None` right now
+## Seatbelt detection: presence-inferred, not a direct read
 
-COCO (the dataset the pretrained `yolo11n.pt` was trained on) doesn't include
-seatbelt or cigarette classes at all - only phone-like ("cell phone") and
-drink-like ("bottle", "cup") objects have a reasonable pretrained approximation.
-Real seatbelt/cigarette/food detection needs your own annotated dataset and a
-fine-tuned model (Phases 9-11). Until `models/best.pt` exists, those two fields
-report `None` (meaning "not yet supported") rather than `False`, so the risk
-engine correctly treats them as unknown instead of silently assuming "safe".
+`models/best.pt` (Drinking/Eating/Phone/Seatbelt/Smoking) only has a
+"Seatbelt" class for the belt *worn/visible* - there's no negative class,
+since you can't draw a bounding box around an object that isn't there. So
+`seatbelt_off` isn't read directly off a detection: `DetectionConfirmer`
+(`app/yolo_detector.py`) tracks how long it's been since the belt was last
+seen, and infers "off" once that exceeds `SEATBELT_ABSENCE_INFER_SEC`
+(8s, in `config.py`). It stays `None` (unknown) until the belt has been
+confirmed visible at least once. If `cigarette` still needs a wider dataset
+for reliable "Smoking" detection, it reads `None` too (not `False`) so the
+risk engine treats it as unknown rather than silently assuming "safe".
 
 ## Next steps for you
 
-1. Move `yolo11n.pt` into `models/` and run `python -m app.main` to confirm
-   Phases 1-8 + 13-14 work end-to-end with live video.
-2. Start collecting images for Phase 9 (see the diversity checklist in the
-   original spec: different people, lighting, angles, occlusions, day/night).
-3. Annotate in Roboflow (you already have it connected) and export in YOLO
-   format into `datasets/`.
-4. Fill in `datasets/data.yaml` with your final class names.
-5. Run `training/train.py`, then `training/evaluate.py` to check mAP50.
-6. Copy the resulting `best.pt` into `models/` - `yolo_detector.py` will pick
-   it up automatically on the next run, no code changes needed.
-7. Once on the Raspberry Pi, run `training/export.py --format ncnn` (or onnx)
+1. Run `python -m app.main` and confirm the full pipeline works end-to-end
+   with live video, now that `models/best.pt` is in place.
+2. Run `training/evaluate.py` against `models/best.pt` to check per-class
+   mAP/precision/recall - if any class underperforms, more training data for
+   just that class (see the diversity checklist: angles, lighting, occlusion,
+   day/night) is usually the fix, not a different model architecture.
+3. If you retrain with additional/renamed classes, update
+   `datasets/data.yaml` to match and confirm `app/yolo_detector.py`'s
+   substring matching still picks them up correctly.
+4. Once on the Raspberry Pi, run `training/export.py --format ncnn` (or onnx)
    and benchmark FPS to confirm you're hitting the 20+ FPS target.

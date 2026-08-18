@@ -14,12 +14,21 @@ test: test/images
 
 nc: 5   # number of classes - update if you add/remove classes
 names:
-  0: phone
-  1: seatbelt_off
-  2: cigarette
-  3: food
-  4: drink
+  0: Drinking
+  1: Eating
+  2: Phone
+  3: Seatbelt
+  4: Smoking
 
-# NOTE: yolo_detector.py matches class names by substring (case-insensitive),
-# e.g. "seatbelt_off" -> seatbelt_off = True. Keep names close to these or
-# update the matching logic in app/yolo_detector.py to match your final names.
+# NOTE: yolo_detector.py matches class names by substring (case-insensitive):
+#   "phone" -> phone, "drink"/"bottle"/"cup" -> drink, "food"/"eating" -> food,
+#   "cigarette"/"smoking" -> cigarette, "seatbelt"/"belt" -> seatbelt_off.
+#
+# IMPORTANT: "Seatbelt" here is a PRESENCE class (the belt is visible/worn),
+# not an absence class - there's no box for "no seatbelt", since you can't
+# draw a bounding box around something that isn't there. seatbelt_off is
+# therefore INFERRED from the belt going unseen for SEATBELT_ABSENCE_INFER_SEC
+# (config.py), not read directly off a detection - see
+# DetectionConfirmer._update_seatbelt() in app/yolo_detector.py. If you ever
+# train a model with an explicit negative class instead (e.g. "no_seatbelt"),
+# name it with "no"/"off"/"unworn" in the label and that path is handled too.

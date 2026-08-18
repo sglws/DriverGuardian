@@ -185,7 +185,7 @@ def main():
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
                 raw_yolo_state = yolo.detect(frame, mouth_roi=roi)
-                cached_yolo_state = yolo_confirmer.update(raw_yolo_state)
+                cached_yolo_state = yolo_confirmer.update(raw_yolo_state, now)
             yolo_state = cached_yolo_state
 
             risk, messages, debug = risk_engine.evaluate(

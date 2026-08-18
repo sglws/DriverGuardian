@@ -4,15 +4,16 @@ yolo_detector.py
 Phase 8 deliverable: run pretrained YOLO Nano for a quick sanity check
 (detects generic COCO classes like "cell phone", "bottle", "cup").
 
-Phase 11 hook: once you've collected/annotated your own dataset (Phases
-9-10) and fine-tuned YOLO on your custom classes (phone, seatbelt,
-cigarette, food, drink), drop the resulting weights at
-`models/best.pt` and this module will automatically prefer it over the
-generic pretrained model - no code changes needed.
+Phase 11: once `models/best.pt` exists, this module automatically prefers
+it over the generic pretrained model - no code changes needed to switch.
+Class-name matching (see detect() below) is substring-based and
+case-insensitive, so it tolerates naming variation between datasets, e.g.
+this project's current best.pt uses {Phone, Drinking, Eating, Smoking,
+Seatbelt} rather than the datasets/data.yaml template's exact names.
 
-Until best.pt exists, "seatbelt" and "cigarette" are NOT detectable
-(they aren't in COCO's 80 classes), so those come back as None
-(meaning "unknown / not yet supported") rather than False.
+Without a fine-tuned model, "seatbelt" and "cigarette" are NOT detectable
+at all (not in COCO's 80 classes), so those come back as None (meaning
+"unknown / not yet supported") rather than False.
 """
 
 import os
@@ -26,7 +27,7 @@ try:
 except ImportError:
     _ULTRALYTICS_AVAILABLE = False
 
-_VOTED_KEYS = ("phone", "drink", "food", "cigarette", "seatbelt_off")
+_VOTED_KEYS = ("phone", "drink", "food", "cigarette")
 
 
 class DetectionConfirmer:
@@ -35,6 +36,13 @@ class DetectionConfirmer:
     inferences, and only clears once absence has the same weight of
     evidence. Symmetric by construction - cuts single-frame false positives
     from the COCO-proxy classes without masking a real, sustained detection.
+
+    seatbelt_off is handled separately (see _update_seatbelt below): most
+    fine-tuned models (including this project's current best.pt) only have
+    a "Seatbelt" (worn/visible) class, not a distinct "unworn" one - there's
+    no box to draw around an object that isn't there. "Off" has to be
+    inferred from the belt going unseen for a sustained period instead of
+    from a K-of-N vote on an explicit negative detection.
     """
 
     def __init__(self, window: int = config.YOLO_CONFIRM_WINDOW,
@@ -42,8 +50,9 @@ class DetectionConfirmer:
         self.window = window
         self.min_hits = min_hits
         self._history = {key: deque(maxlen=window) for key in _VOTED_KEYS}
+        self._seatbelt_last_visible_at = None
 
-    def update(self, raw_state: dict) -> dict:
+    def update(self, raw_state: dict, now: float) -> dict:
         confirmed = dict(raw_state)
         for key in _VOTED_KEYS:
             value = raw_state.get(key)
@@ -53,7 +62,24 @@ class DetectionConfirmer:
             hist = self._history[key]
             hist.append(bool(value))
             confirmed[key] = sum(hist) >= self.min_hits
+
+        confirmed["seatbelt_off"] = self._update_seatbelt(raw_state.get("seatbelt_off"), now)
         return confirmed
+
+    def _update_seatbelt(self, raw_value, now: float):
+        if raw_value is True:
+            # An explicit negative ("no_seatbelt"-style) class was matched
+            # this frame - trust it immediately, no need to wait on absence.
+            self._seatbelt_last_visible_at = None
+            return True
+        if raw_value is False:
+            # Belt seen worn this frame.
+            self._seatbelt_last_visible_at = now
+            return False
+        # raw_value is None: no seatbelt-related box this frame at all.
+        if self._seatbelt_last_visible_at is None:
+            return None  # never confirmed visible yet - genuinely unknown
+        return (now - self._seatbelt_last_visible_at) >= config.SEATBELT_ABSENCE_INFER_SEC
 
 
 class YoloDetector:
@@ -147,14 +173,20 @@ class YoloDetector:
                     result["phone"] = True
                 elif "drink" in name or "bottle" in name or "cup" in name:
                     result["drink"] = result["drink"] or near_mouth((x1, y1, x2, y2))
-                elif "food" in name:
+                elif "food" in name or "eating" in name:
                     result["food"] = result["food"] or near_mouth((x1, y1, x2, y2))
                 elif "cigarette" in name or "smoking" in name:
                     result["cigarette"] = bool(result["cigarette"]) or near_mouth((x1, y1, x2, y2))
                 elif "seatbelt" in name or "belt" in name:
-                    # Convention: your training set should label the UNWORN/absent
-                    # state, e.g. class "no_seatbelt" -> seatbelt_off = True
-                    result["seatbelt_off"] = "no" in name or "off" in name or "unworn" in name
+                    if "no" in name or "off" in name or "unworn" in name:
+                        # Explicit negative class (some datasets have one) -
+                        # trust it directly, this frame.
+                        result["seatbelt_off"] = True
+                    else:
+                        # Plain "Seatbelt" = the belt IS visible/worn this
+                        # frame. DetectionConfirmer infers "off" from
+                        # SUSTAINED absence of this signal, not from here.
+                        result["seatbelt_off"] = False
         else:
             # Fallback: approximate using generic COCO classes (Phase 8 sanity check)
             for box in boxes:
