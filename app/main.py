@@ -46,7 +46,7 @@ def setup_csv_logger():
     path = os.path.join(config.LOGS_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}.csv")
     f = open(path, "w", newline="")
     writer = csv.writer(f)
-    writer.writerow(["timestamp", "risk", "score", "eye_closed", "closed_elapsed",
+    writer.writerow(["timestamp", "risk", "case", "score", "eye_closed", "closed_elapsed",
                       "blink_rate", "mouth_open", "total_yawns", "pitch_delta", "yaw_delta",
                       "phone", "drink", "food", "seatbelt_off", "messages"])
     return f, writer, path
@@ -191,11 +191,11 @@ def main():
             risk, messages, debug = risk_engine.evaluate(
                 now, presence, drowsy_state, pose_state, yolo_state
             )
-            alerts.dispatch(risk, messages)
+            alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
-            cv2.putText(frame, f"RISK: {risk.name}  (score={debug.get('score', '-')})",
+            cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
                         (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
 
             panel = [
@@ -247,7 +247,7 @@ def main():
             # ---- Console live log ----
             if now - last_console_log >= config.CONSOLE_LOG_INTERVAL_SEC:
                 last_console_log = now
-                print(f"[{utils.timestamp()}] RISK={risk.name:6s} score={debug.get('score')} | "
+                print(f"[{utils.timestamp()}] RISK={risk.name:6s} case={debug.get('case', 'NONE'):16s} score={debug.get('score')} | "
                       f"Eyes={'CLOSED' if drowsy_state['eye_closed'] else 'OPEN':6s} "
                       f"EAR={smoothed_ear:.2f} | Pitch={pose_state['pitch_label']:8s} "
                       f"d={pose_state['pitch_delta']:+5.1f} | Yaw={pose_state['yaw_label']:6s} "
@@ -257,7 +257,7 @@ def main():
             if now - last_csv_log >= config.CSV_LOG_INTERVAL_SEC:
                 last_csv_log = now
                 csv_writer.writerow([
-                    utils.timestamp(), risk.name, debug.get("score"),
+                    utils.timestamp(), risk.name, debug.get("case", "NONE"), debug.get("score"),
                     drowsy_state["eye_closed"], f"{drowsy_state['closed_elapsed']:.2f}",
                     drowsy_state["blink_rate"], drowsy_state["mouth_open"], drowsy_state["total_yawns"],
                     f"{pose_state['pitch_delta']:.1f}",

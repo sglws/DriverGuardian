@@ -164,3 +164,15 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 CONSOLE_LOG_INTERVAL_SEC = 0.5
 CSV_LOG_INTERVAL_SEC = 1.0
+
+# --------------------------------------------------------------------------
+# ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)
+# --------------------------------------------------------------------------
+# Set up via `sudo rfcomm bind rfcomm0 <ESP32_MAC_ADDRESS> 1` after pairing
+# (see README). Baudrate is a required pyserial argument but is meaningless
+# over RFCOMM - the ESP32 firmware's Serial.begin(115200) is what actually
+# matters for its USB debug console, not this link.
+ESP32_SERIAL_PORT = "/dev/rfcomm0"
+ESP32_BAUD_RATE = 115200
+ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
+ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # don't hammer a failed port open every frame
