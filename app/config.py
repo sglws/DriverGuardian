@@ -57,8 +57,12 @@ BLINK_RATE_DROWSY_THRESHOLD = 6  # blinks within window considered excessive/dro
 # neutral/closed-mouth MAR does).
 # --------------------------------------------------------------------------
 MAR_SMOOTHING_FRAMES = 3
-MAR_YAWN_RATIO = 1.8            # mouth counted "open" once MAR exceeds this multiple of baseline
-YAWN_MIN_DURATION_SEC = 1.5     # must stay open this long to count as a yawn, not talking/a word
+# A yawn is a much wider, more sustained gape than speech ever produces -
+# an open vowel or a drawn-out word can still briefly cross a low ratio/
+# short duration, which is what was causing normal talking to register as
+# yawning. Both raised so only a genuine wide, held-open mouth counts:
+MAR_YAWN_RATIO = 2.6            # mouth counted "open" once MAR exceeds this multiple of baseline
+YAWN_MIN_DURATION_SEC = 3.2     # must stay open this long to count as a yawn, not talking/a word
 YAWN_RATE_WINDOW_SEC = 10.0     # window for counting repeated yawns
 YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still LOW-risk) signal
 
@@ -124,7 +128,14 @@ LOW_LIGHT_BRIGHTNESS_THRESHOLD = 60.0  # mean grayscale brightness below this ->
 # --------------------------------------------------------------------------
 # YOLO / distraction detection (Phases 8-12)
 # --------------------------------------------------------------------------
-YOLO_CONF_THRESHOLD = 0.45
+# TEMPORARILY lowered from 0.45 to help diagnose "seatbelt/smoking not
+# detecting at all" - this is applied INSIDE model.predict(), so anything
+# below it never even reaches our code. Lowering it surfaces weak/borderline
+# boxes in the new raw-detection overlay/console output so we can tell
+# whether the model is trying and just under-confident (raise this back
+# toward 0.4-0.45 once you see real numbers) vs. never proposing a box for
+# that class at all (a training-data problem, not a threshold one).
+YOLO_CONF_THRESHOLD = 0.20
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 3     # run YOLO on 1-in-3 frames; reuse last result otherwise
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate

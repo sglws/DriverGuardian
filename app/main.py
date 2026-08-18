@@ -221,8 +221,15 @@ def main():
                 f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
 
                 f"YOLO: phone={yolo_state['phone']} drink={yolo_state['drink']} "
-                f"food={yolo_state['food']} seatbelt_off={yolo_state['seatbelt_off']} "
+                f"food={yolo_state['food']} cigarette={yolo_state['cigarette']} "
+                f"seatbelt_off={yolo_state['seatbelt_off']} "
                 f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
+
+                # Raw, ungated model output (label:confidence) - diagnostic
+                # visibility into what the model actually sees, before
+                # mouth-proximity gating or K-of-N confirmation are applied.
+                "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}" for *_, lbl, conf in yolo_state["raw_boxes"])
+                                  or "(none)"),
 
                 f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
             ]
@@ -252,6 +259,9 @@ def main():
                       f"EAR={smoothed_ear:.2f} | Pitch={pose_state['pitch_label']:8s} "
                       f"d={pose_state['pitch_delta']:+5.1f} | Yaw={pose_state['yaw_label']:6s} "
                       f"d={pose_state['yaw_delta']:+5.1f} | {' / '.join(messages[:2])}")
+                if yolo_state["raw_boxes"]:
+                    boxes_str = ", ".join(f"{lbl}:{conf:.2f}" for *_, lbl, conf in yolo_state["raw_boxes"])
+                    print(f"    -> YOLO raw: {boxes_str}")
 
             # ---- CSV log ----
             if now - last_csv_log >= config.CSV_LOG_INTERVAL_SEC:
