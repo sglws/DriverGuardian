@@ -14,17 +14,24 @@ change, so it doubles as a heartbeat: the ESP32 firmware treats a gap
 longer than its own timeout as a Bluetooth link failure and fails safe
 independently (flowchart Case 8: "Bluetooth Failure -> HIGH -> Safe stop
 mode") - it can't wait around for a Pi that may itself be the problem.
+
+Connects with a raw AF_BLUETOOTH/BTPROTO_RFCOMM socket straight to the
+ESP32's MAC address (config.ESP32_MAC_ADDRESS) - no `rfcomm bind`/
+`/dev/rfcommX` device file involved. This process owns the one connection
+itself; don't also run a separate always-on script/systemd service
+connecting to the same ESP32, since classic Bluetooth SPP only accepts
+one client at a time and the two would fight over that single slot.
 """
 
+import socket
 import time
 
 from app.risk_engine import Risk
 
 try:
-    import serial
-    _PYSERIAL_AVAILABLE = True
-except ImportError:
-    _PYSERIAL_AVAILABLE = False
+    _BLUETOOTH_SOCKETS_AVAILABLE = hasattr(socket, "AF_BLUETOOTH") and hasattr(socket, "BTPROTO_RFCOMM")
+except Exception:
+    _BLUETOOTH_SOCKETS_AVAILABLE = False
 
 try:
     import pyttsx3
@@ -48,19 +55,20 @@ def _speak(text: str):
 
 
 class Esp32Link:
-    """Bluetooth RFCOMM serial link to the ESP32. Opens lazily, retries on
-    a cooldown after a failure rather than blocking the main loop, and
-    never raises - a disconnected ESP32 shouldn't crash driver monitoring.
+    """Raw Bluetooth RFCOMM socket link to the ESP32. Connects lazily,
+    retries on a cooldown after a failure rather than blocking the main
+    loop, and never raises - a disconnected ESP32 shouldn't crash driver
+    monitoring.
     """
 
     def __init__(self):
-        self._serial = None
+        self._sock = None
         self._last_attempt = 0.0
 
     def _ensure_open(self):
-        if self._serial is not None:
-            return self._serial
-        if not _PYSERIAL_AVAILABLE:
+        if self._sock is not None:
+            return self._sock
+        if not _BLUETOOTH_SOCKETS_AVAILABLE:
             return None
 
         now = time.time()
@@ -69,29 +77,33 @@ class Esp32Link:
         self._last_attempt = now
 
         try:
-            self._serial = serial.Serial(config.ESP32_SERIAL_PORT, config.ESP32_BAUD_RATE, timeout=0.2)
-            print(f"[ESP32] Connected on {config.ESP32_SERIAL_PORT}")
+            sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
+            sock.settimeout(2.0)
+            sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
+            sock.settimeout(0.2)  # short timeout for the actual send() calls below
+            self._sock = sock
+            print(f"[ESP32] Connected to {config.ESP32_MAC_ADDRESS}")
         except Exception as e:
-            print(f"[ESP32] Could not open {config.ESP32_SERIAL_PORT}: {e} "
+            print(f"[ESP32] Could not connect to {config.ESP32_MAC_ADDRESS}: {e} "
                   f"(will retry in {config.ESP32_RECONNECT_COOLDOWN_SEC:.0f}s)")
-            self._serial = None
-        return self._serial
+            self._sock = None
+        return self._sock
 
     def send(self, risk_name: str, case: str):
         line = f"{risk_name},{case}\n"
-        ser = self._ensure_open()
-        if ser is None:
+        sock = self._ensure_open()
+        if sock is None:
             print(f"[ESP32 -> ] (not connected) {line.strip()}")
             return
         try:
-            ser.write(line.encode("ascii", errors="replace"))
+            sock.send(line.encode("ascii", errors="replace"))
         except Exception as e:
-            print(f"[ESP32] Write failed, will reconnect: {e}")
+            print(f"[ESP32] Send failed, will reconnect: {e}")
             try:
-                ser.close()
+                sock.close()
             except Exception:
                 pass
-            self._serial = None
+            self._sock = None
 
 
 class AlertSystem:

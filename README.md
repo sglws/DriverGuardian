@@ -156,15 +156,20 @@ connect AA:BB:CC:DD:EE:FF
 exit
 ```
 
-Bind it to a serial device node the Python side can open directly:
+Paste that MAC address into `config.ESP32_MAC_ADDRESS`.
 
-```bash
-sudo rfcomm bind rfcomm0 AA:BB:CC:DD:EE:FF 1
-```
+`app/alerts.py` connects with a **raw `AF_BLUETOOTH`/`BTPROTO_RFCOMM` socket
+straight to that MAC address** - not `rfcomm bind`/`/dev/rfcommX`, which has
+proven unreliable on some BlueZ versions. No extra setup beyond pairing +
+trusting above; nothing needs to survive a reboot separately, since the app
+opens the connection itself each time it starts.
 
-That creates `/dev/rfcomm0` (matches `config.ESP32_SERIAL_PORT`). `rfcomm
-bind` doesn't survive a reboot by default - re-run it after a Pi restart, or
-add it to a startup script/systemd unit if you want it automatic.
+**Important:** don't also run a separate always-on script/service (e.g. a
+systemd unit) that connects to the ESP32 on its own. Classic Bluetooth SPP
+only accepts one connected client at a time - if something else is already
+holding that connection, the app's own connection attempt will be refused.
+Only one thing should ever be connecting to the ESP32 at a time, and it
+should be the app itself.
 
 ### 4. Run it
 

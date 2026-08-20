@@ -3,4 +3,3 @@ mediapipe>=0.10.14
 numpy
 ultralytics
 pyttsx3
-pyserial
