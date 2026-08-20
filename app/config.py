@@ -192,7 +192,7 @@ CSV_LOG_INTERVAL_SEC = 1.0
 # (`bluetoothctl pair`/`trust` - see README); that part is unchanged.
 # Fill in your ESP32's actual MAC address (`bluetoothctl devices` after
 # pairing, or read it off the ESP32's own Serial Monitor output at boot).
-ESP32_MAC_ADDRESS = "AA:BB:CC:11:22:33"
+ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
 ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # don't hammer a failed connection attempt every frame
