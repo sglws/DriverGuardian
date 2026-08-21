@@ -86,7 +86,13 @@ class Esp32Link:
 
         try:
             sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-            sock.settimeout(2.0)
+            # No timeout for connect() itself: a Classic Bluetooth RFCOMM
+            # handshake can legitimately take longer than a couple of
+            # seconds (confirmed on this hardware - a 2s timeout was
+            # cutting the handshake off mid-negotiation, which surfaced as
+            # a low-level "Invalid exchange" error rather than a clean
+            # timeout). This call blocks the frame it's called from, but
+            # only during the rare reconnect attempt, not steady-state.
             sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
             sock.settimeout(0.2)  # short timeout for the actual send() calls below
             self._sock = sock
