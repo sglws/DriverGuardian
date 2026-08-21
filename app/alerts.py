@@ -81,17 +81,26 @@ class Esp32Link:
         `bluetoothctl connect` establishes that link even though it
         reports a spurious "profile unavailable" error for SPP (bluetoothd
         has no generic serial-port profile handler registered - harmless,
-        we don't need it to succeed, just to bring the link up). Best
-        effort: failures/timeouts here are ignored, the raw socket connect
-        right after is the real attempt.
+        we don't need it to succeed, just to bring the link up).
+
+        `bluetoothctl connect <MAC>` run as a one-shot command returns as
+        soon as the connect request is *sent*, not once the link is
+        actually up (unlike watching it interactively, where you naturally
+        wait to see "Connected: yes" before doing anything else) - so a
+        short sleep after it is needed to let the link actually settle
+        before the raw socket connect below. Best effort throughout:
+        failures/timeouts here are logged but not fatal, the raw socket
+        connect right after is the real attempt.
         """
         try:
-            subprocess.run(
+            result = subprocess.run(
                 ["bluetoothctl", "connect", config.ESP32_MAC_ADDRESS],
                 capture_output=True, timeout=10, text=True,
             )
-        except Exception:
-            pass
+            print(f"[ESP32] bluetoothctl connect: {result.stdout.strip() or result.stderr.strip()}")
+        except Exception as e:
+            print(f"[ESP32] bluetoothctl connect failed to run: {e}")
+        time.sleep(2.0)  # let the ACL link actually settle before the raw socket connect
 
     def _ensure_open(self):
         if self._sock is not None:
