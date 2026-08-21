@@ -33,6 +33,14 @@ try:
 except Exception:
     _BLUETOOTH_SOCKETS_AVAILABLE = False
 
+if not _BLUETOOTH_SOCKETS_AVAILABLE:
+    # Without this, a missing AF_BLUETOOTH/BTPROTO_RFCOMM silently made
+    # every send() a no-op forever - "(not connected)" with no explanation
+    # anywhere, indistinguishable from a real connection failure.
+    print("[ESP32] This Python has no AF_BLUETOOTH/BTPROTO_RFCOMM socket support - "
+          "the ESP32 link is disabled. (Expected on Windows; on Linux, this usually "
+          "means bluez/python3-dev support wasn't compiled in.)")
+
 try:
     import pyttsx3
     _tts_engine = pyttsx3.init()
