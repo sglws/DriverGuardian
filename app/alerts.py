@@ -24,6 +24,7 @@ one client at a time and the two would fight over that single slot.
 """
 
 import socket
+import subprocess
 import time
 
 from app.risk_engine import Risk
@@ -73,6 +74,25 @@ class Esp32Link:
         self._sock = None
         self._last_attempt = 0.0
 
+    def _prime_acl_link(self):
+        """A cold raw RFCOMM socket connect() to this ESP32 reliably fails
+        with `[Errno 52] Invalid exchange` - confirmed on this hardware -
+        unless the underlying ACL (baseband) link is already up.
+        `bluetoothctl connect` establishes that link even though it
+        reports a spurious "profile unavailable" error for SPP (bluetoothd
+        has no generic serial-port profile handler registered - harmless,
+        we don't need it to succeed, just to bring the link up). Best
+        effort: failures/timeouts here are ignored, the raw socket connect
+        right after is the real attempt.
+        """
+        try:
+            subprocess.run(
+                ["bluetoothctl", "connect", config.ESP32_MAC_ADDRESS],
+                capture_output=True, timeout=10, text=True,
+            )
+        except Exception:
+            pass
+
     def _ensure_open(self):
         if self._sock is not None:
             return self._sock
@@ -84,15 +104,15 @@ class Esp32Link:
             return None
         self._last_attempt = now
 
+        self._prime_acl_link()
+
         try:
             sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
             # No timeout for connect() itself: a Classic Bluetooth RFCOMM
-            # handshake can legitimately take longer than a couple of
-            # seconds (confirmed on this hardware - a 2s timeout was
-            # cutting the handshake off mid-negotiation, which surfaced as
-            # a low-level "Invalid exchange" error rather than a clean
-            # timeout). This call blocks the frame it's called from, but
-            # only during the rare reconnect attempt, not steady-state.
+            # handshake can legitimately take a few seconds, especially
+            # right after _prime_acl_link() above. This call blocks the
+            # frame it's called from, but only during the rare reconnect
+            # attempt, not steady-state.
             sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
             sock.settimeout(0.2)  # short timeout for the actual send() calls below
             self._sock = sock
