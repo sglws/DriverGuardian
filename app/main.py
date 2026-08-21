@@ -188,6 +188,13 @@ def main():
                 cached_yolo_state = yolo_confirmer.update(raw_yolo_state, now)
             yolo_state = cached_yolo_state
 
+            # ---- Draw YOLO bounding boxes (raw, ungated detections) ----
+            for x1, y1, x2, y2, label, conf in yolo_state["raw_boxes"]:
+                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
+                cv2.putText(frame, f"{label} {conf:.2f}", (x1, max(y1 - 8, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+
             risk, messages, debug = risk_engine.evaluate(
                 now, presence, drowsy_state, pose_state, yolo_state
             )
