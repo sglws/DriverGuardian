@@ -73,6 +73,7 @@ class Esp32Link:
     def __init__(self):
         self._sock = None
         self._last_attempt = 0.0
+        self._consecutive_send_failures = 0
 
     def _prime_acl_link(self):
         """A cold raw RFCOMM socket connect() to this ESP32 reliably fails
@@ -123,8 +124,13 @@ class Esp32Link:
             # frame it's called from, but only during the rare reconnect
             # attempt, not steady-state.
             sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
-            sock.settimeout(0.2)  # short timeout for the actual send() calls below
+            # 0.2s here was too aggressive for this link and a single slow
+            # send (confirmed: the very first one, right after connecting)
+            # tore the whole connection down over a transient hiccup - see
+            # _consecutive_send_failures below for the other half of this fix.
+            sock.settimeout(2.0)
             self._sock = sock
+            self._consecutive_send_failures = 0
             print(f"[ESP32] Connected to {config.ESP32_MAC_ADDRESS}")
         except Exception as e:
             print(f"[ESP32] Could not connect to {config.ESP32_MAC_ADDRESS}: {e} "
@@ -140,13 +146,29 @@ class Esp32Link:
             return
         try:
             sock.send(line.encode("ascii", errors="replace"))
+            self._consecutive_send_failures = 0
         except Exception as e:
-            print(f"[ESP32] Send failed, will reconnect: {e}")
-            try:
-                sock.close()
-            except Exception:
-                pass
-            self._sock = None
+            self._consecutive_send_failures += 1
+            # A single slow/dropped send on a Bluetooth Classic link is
+            # often just a transient hiccup, not a real disconnection -
+            # confirmed on this hardware: tearing the connection down on
+            # the very first failure caused a reconnect that hit the ESP32
+            # mid-teardown ("Device or resource busy"), which then got
+            # stuck ("Host is down") because the old connection hadn't
+            # been released cleanly on its end yet. Only reconnect once
+            # failures are clearly sustained, not a one-off blip.
+            if self._consecutive_send_failures >= config.ESP32_SEND_FAILURE_TOLERANCE:
+                print(f"[ESP32] Send failed {self._consecutive_send_failures}x in a row, "
+                      f"reconnecting: {e}")
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self._sock = None
+                self._consecutive_send_failures = 0
+            else:
+                print(f"[ESP32] Send failed ({self._consecutive_send_failures}/"
+                      f"{config.ESP32_SEND_FAILURE_TOLERANCE}, not reconnecting yet): {e}")
 
 
 class AlertSystem:
