@@ -55,6 +55,13 @@ def setup_csv_logger():
 def main():
     print("Starting DriverGuardian...")
 
+    # WINDOW_NORMAL (resizable) instead of imshow()'s default AUTOSIZE
+    # behavior - AUTOSIZE pins the drawn image at its native pixel size
+    # in the corner when the window manager maximizes/resizes the window,
+    # leaving the rest blank. This makes OpenCV actually scale the frame
+    # to fill whatever size the window ends up at.
+    cv2.namedWindow("DriverGuardian", cv2.WINDOW_NORMAL)
+
     camera = Camera()
     presence_detector = PresenceDetector()
     face_mesh = FaceMeshWrapper()
