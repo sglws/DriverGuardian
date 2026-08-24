@@ -312,6 +312,7 @@ def main():
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
+        alerts.close()
         log_file.close()
         print(f"Session log saved: {log_path}")
 
