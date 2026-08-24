@@ -100,12 +100,3 @@ def box_near_point(box, cx, cy, radius) -> bool:
     x1, y1, x2, y2 = box[:4]
     bx, by = (x1 + x2) / 2.0, (y1 + y2) / 2.0
     return euclidean((bx, by), (cx, cy)) <= radius
-
-
-def seatbelt_label(seatbelt_off) -> str:
-    """Human-facing label for the seatbelt_off tri-state - the raw
-    "seatbelt_off=True/False" boolean reads like a double negative on the
-    overlay (easy to misread as inverted at a glance)."""
-    if seatbelt_off is None:
-        return "UNKNOWN"
-    return "OFF" if seatbelt_off else "ON"
