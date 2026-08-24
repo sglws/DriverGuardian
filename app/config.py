@@ -128,14 +128,25 @@ LOW_LIGHT_BRIGHTNESS_THRESHOLD = 60.0  # mean grayscale brightness below this ->
 # --------------------------------------------------------------------------
 # YOLO / distraction detection (Phases 8-12)
 # --------------------------------------------------------------------------
-# TEMPORARILY lowered from 0.45 to help diagnose "seatbelt/smoking not
-# detecting at all" - this is applied INSIDE model.predict(), so anything
-# below it never even reaches our code. Lowering it surfaces weak/borderline
-# boxes in the new raw-detection overlay/console output so we can tell
-# whether the model is trying and just under-confident (raise this back
-# toward 0.4-0.45 once you see real numbers) vs. never proposing a box for
-# that class at all (a training-data problem, not a threshold one).
+# Kept low - this is the floor applied INSIDE model.predict() itself, so
+# anything below it never even reaches our code at all. Per-class filtering
+# happens afterward in yolo_detector.py via YOLO_CLASS_CONF_THRESHOLDS below,
+# so this just needs to be <= the lowest per-class threshold to make sure
+# nothing potentially useful gets discarded before that logic runs.
 YOLO_CONF_THRESHOLD = 0.20
+
+# Per-class confidence floor, applied in yolo_detector.py after the raw
+# (low-threshold) predict() call above. A single global threshold can't
+# serve every class well: phone needs to stay permissive (missed phones -
+# false negatives - were the bigger problem), while drink needs to be
+# stricter (weak/wrong "Drinking" guesses - false positives - were the
+# problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
+YOLO_CLASS_CONF_THRESHOLDS = {
+    "phone": 0.20,
+    "drink": 0.55,
+    "seatbelt": 0.20,  # already working well at this level - don't disturb
+}
+YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 3     # run YOLO on 1-in-3 frames; reuse last result otherwise
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate

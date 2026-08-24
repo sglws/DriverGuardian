@@ -117,13 +117,12 @@ def main():
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
             std_dev = utils.frame_std_dev(gray)
             brightness = utils.frame_mean_brightness(gray)
-            # Keep the true, unenhanced frame for YOLO - CLAHE was tuned for
-            # MediaPipe's landmark detection specifically and was never
-            # validated against this YOLO model. Feeding it enhanced frames
-            # too was a likely contributor to weaker detections than seen
-            # testing off-device, since the model never saw CLAHE'd images
-            # during training.
-            yolo_frame = frame
+            # NOTE: CLAHE-enhanced frames also get fed to YOLO (not just
+            # MediaPipe) - a prior attempt to hold back the raw frame from
+            # YOLO here (on the untested theory that CLAHE hurt it, since
+            # the model never saw enhanced images during training) turned
+            # out to measurably hurt phone detection in practice. Reverted:
+            # real-world results over an unproven theory.
             if brightness < config.LOW_LIGHT_BRIGHTNESS_THRESHOLD:
                 frame = utils.enhance_low_light(frame)
 
@@ -198,7 +197,7 @@ def main():
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                raw_yolo_state = yolo.detect(yolo_frame, mouth_roi=roi)
+                raw_yolo_state = yolo.detect(frame, mouth_roi=roi)
                 cached_yolo_state = yolo_confirmer.update(raw_yolo_state, now)
             yolo_state = cached_yolo_state
 

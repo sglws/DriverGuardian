@@ -166,6 +166,13 @@ class YoloDetector:
         def near_mouth(box) -> bool:
             return mouth_roi is None or utils.box_near_point(box, *mouth_roi)
 
+        def passes(category: str, conf: float) -> bool:
+            # raw_boxes always gets every box regardless (diagnostic
+            # visibility into what the model considered) - this only gates
+            # whether a box counts toward the actual phone/drink/etc. flags.
+            threshold = config.YOLO_CLASS_CONF_THRESHOLDS.get(category, config.YOLO_CLASS_CONF_DEFAULT)
+            return conf >= threshold
+
         if self.using_finetuned:
             # Your custom class names from data.yaml (Phase 9-11), e.g.
             # ["phone", "seatbelt", "cigarette", "food", "drink"]
@@ -178,14 +185,20 @@ class YoloDetector:
 
                 name = label.lower()
                 if "phone" in name:
-                    result["phone"] = True
+                    if passes("phone", conf):
+                        result["phone"] = True
                 elif "drink" in name or "bottle" in name or "cup" in name:
-                    result["drink"] = result["drink"] or near_mouth((x1, y1, x2, y2))
+                    if passes("drink", conf):
+                        result["drink"] = result["drink"] or near_mouth((x1, y1, x2, y2))
                 elif "food" in name or "eating" in name:
-                    result["food"] = result["food"] or near_mouth((x1, y1, x2, y2))
+                    if passes("food", conf):
+                        result["food"] = result["food"] or near_mouth((x1, y1, x2, y2))
                 elif "cigarette" in name or "smoking" in name:
-                    result["cigarette"] = bool(result["cigarette"]) or near_mouth((x1, y1, x2, y2))
+                    if passes("cigarette", conf):
+                        result["cigarette"] = bool(result["cigarette"]) or near_mouth((x1, y1, x2, y2))
                 elif "seatbelt" in name or "belt" in name:
+                    if not passes("seatbelt", conf):
+                        continue
                     if "no" in name or "off" in name or "unworn" in name:
                         # Explicit negative class (some datasets have one) -
                         # trust it directly, this frame.
