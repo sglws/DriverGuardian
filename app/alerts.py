@@ -25,7 +25,6 @@ one client at a time and the two would fight over that single slot.
 
 import socket
 import subprocess
-import threading
 import time
 
 from app.risk_engine import Risk
@@ -53,69 +52,28 @@ except Exception:
 from app import config
 
 
-def _speak_blocking(text: str):
+def _speak(text: str):
     if _TTS_AVAILABLE:
         try:
             _tts_engine.say(text)
             _tts_engine.runAndWait()
-            return
         except Exception:
-            pass
-    print(f"[VOICE] {text}")
-
-
-def _speak(text: str):
-    """Fires the actual (potentially multi-second) TTS playback on its own
-    thread - runAndWait() blocking the main video loop for the duration of
-    every spoken warning was another source of the same class of bug as
-    the ESP32 link below (see Esp32Link's docstring)."""
-    threading.Thread(target=_speak_blocking, args=(text,), daemon=True).start()
+            print(f"[VOICE] {text}")
+    else:
+        print(f"[VOICE] {text}")
 
 
 class Esp32Link:
-    """Raw Bluetooth RFCOMM socket link to the ESP32.
-
-    Runs entirely on its own background thread. The connect sequence
-    (bluetoothctl priming + a 2s settle + a blocking socket connect()) can
-    legitimately take 10+ seconds when the ESP32 is unreachable, and used
-    to run on the SAME thread as the video loop - every reconnect attempt
-    froze the entire app (camera, MediaPipe, YOLO, everything) for that
-    long. Confirmed on hardware: this produced ~0.1 FPS while the ESP32
-    was disconnected, since a single attempt often took longer than the
-    reconnect cooldown, so the very next frame would immediately block on
-    another attempt. The main thread now only ever calls set_state()
-    (instant, thread-safe) - all the slow/blocking work happens here,
-    fully decoupled from frame processing.
+    """Raw Bluetooth RFCOMM socket link to the ESP32. Connects lazily,
+    retries on a cooldown after a failure rather than blocking the main
+    loop, and never raises - a disconnected ESP32 shouldn't crash driver
+    monitoring.
     """
 
     def __init__(self):
         self._sock = None
         self._last_attempt = 0.0
         self._consecutive_send_failures = 0
-        self._lock = threading.Lock()
-        self._pending_risk = "SAFE"
-        self._pending_case = "NONE"
-        self._stop = False
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def set_state(self, risk_name: str, case: str):
-        """Called from the main video loop every frame - just records the
-        latest desired state and returns immediately. Never touches the
-        network."""
-        with self._lock:
-            self._pending_risk = risk_name
-            self._pending_case = case
-
-    def close(self):
-        self._stop = True
-
-    def _worker(self):
-        while not self._stop:
-            with self._lock:
-                risk_name, case = self._pending_risk, self._pending_case
-            self._send_once(risk_name, case)
-            time.sleep(config.ESP32_SEND_INTERVAL_SEC)
 
     def _prime_acl_link(self):
         """A cold raw RFCOMM socket connect() to this ESP32 reliably fails
@@ -162,9 +120,9 @@ class Esp32Link:
             sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
             # No timeout for connect() itself: a Classic Bluetooth RFCOMM
             # handshake can legitimately take a few seconds, especially
-            # right after _prime_acl_link() above. Blocking here is fine -
-            # this whole method only ever runs on the background worker
-            # thread (see _worker()), never on the main video-processing one.
+            # right after _prime_acl_link() above. This call blocks the
+            # frame it's called from, but only during the rare reconnect
+            # attempt, not steady-state.
             sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
             # 0.2s here was too aggressive for this link and a single slow
             # send (confirmed: the very first one, right after connecting)
@@ -180,8 +138,7 @@ class Esp32Link:
             self._sock = None
         return self._sock
 
-    def _send_once(self, risk_name: str, case: str):
-        """Runs on the background worker thread only - see _worker()."""
+    def send(self, risk_name: str, case: str):
         line = f"{risk_name},{case}\n"
         sock = self._ensure_open()
         if sock is None:
@@ -216,19 +173,18 @@ class Esp32Link:
 
 class AlertSystem:
     """Tracks last-fired risk tier so voice/dashboard don't spam every
-    frame. The ESP32 link paces its own sends on its own background
-    thread (ESP32_SEND_INTERVAL_SEC) - dispatch() just hands it the
-    latest state every frame, which is instant and never blocks.
+    frame, and rate-limits the ESP32 link to ESP32_SEND_INTERVAL_SEC
+    (its own heartbeat cadence - see Esp32Link/esp32/ sketch docstrings).
     """
 
     def __init__(self):
         self._last_risk = None
+        self._last_esp32_send = 0.0
         self._esp32 = Esp32Link()
 
-    def close(self):
-        self._esp32.close()
-
     def dispatch(self, risk: Risk, messages: list[str], case: str = "NONE"):
+        now = time.time()
+
         # Only re-fire voice/dashboard alerts on a risk-tier change to avoid
         # spamming the driver every single frame at 20-30 FPS.
         changed = risk != self._last_risk
@@ -247,4 +203,6 @@ class AlertSystem:
 
         # The ESP32 gets every risk tier, including SAFE - it needs the
         # continuous stream to tell "still SAFE" apart from "link down".
-        self._esp32.set_state(risk.name, case)
+        if now - self._last_esp32_send >= config.ESP32_SEND_INTERVAL_SEC:
+            self._last_esp32_send = now
+            self._esp32.send(risk.name, case)
