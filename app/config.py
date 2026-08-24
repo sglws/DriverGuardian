@@ -144,10 +144,13 @@ SEATBELT_UNWORN_ESCALATE_SEC = 10.0
 
 # Some fine-tuned models (e.g. this project's current best.pt) only have a
 # "Seatbelt" (worn/visible) class, not a distinct "unworn" class - there's
-# no box to draw around an absent object. seatbelt_off is inferred from the
-# belt going UNSEEN for this long, not from an explicit negative detection.
-# See DetectionConfirmer in yolo_detector.py.
-SEATBELT_ABSENCE_INFER_SEC = 8.0
+# no box to draw around an absent object. seatbelt_off is inferred via
+# Hysteresis (DetectionConfirmer in yolo_detector.py), deliberately
+# asymmetric: a real cabin has the belt flicker out of view constantly
+# (hands, steering, camera angle), so re-confirming "on" should be fast;
+# a real removal is sustained, so confirming "off" should be patient.
+SEATBELT_ON_CONFIRM_SEC = 0.5    # belt seen worn -> confirm "on" quickly
+SEATBELT_OFF_CONFIRM_SEC = 6.0   # belt continuously unseen this long -> confirm "off"
 
 # K-of-N voting: an object flag only counts as active once it appears in at
 # least YOLO_CONFIRM_MIN of the last YOLO_CONFIRM_WINDOW inferences. Symmetric
