@@ -143,7 +143,7 @@ YOLO_CONF_THRESHOLD = 0.20
 # problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.20,
-    "drink": 0.55,
+    "drink": 0.65,     # raised further - 0.55 still wasn't enough to stop false positives
     "seatbelt": 0.20,  # already working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
@@ -171,7 +171,10 @@ YOLO_CONFIRM_MIN = 2
 
 # Case 5 (eating/drinking/smoking) requires the object to be near the mouth.
 # Radius, as a multiple of the mouth-corner distance, defining "near".
-MOUTH_PROXIMITY_RADIUS_MULT = 3.5
+# 3.5x worked out to roughly a quarter of the frame width in testing - far
+# wider than "near the mouth" should mean, and a second, independent source
+# of drink false positives alongside a too-low confidence threshold.
+MOUTH_PROXIMITY_RADIUS_MULT = 1.5
 
 # COCO class names (pretrained yolo11n.pt) that approximate our target behaviors
 # until the fine-tuned model (Phase 11) with real "phone/seatbelt/cigarette/food"
