@@ -43,6 +43,13 @@ class DetectionConfirmer:
     no box to draw around an object that isn't there. "Off" has to be
     inferred from the belt going unseen for a sustained period instead of
     from a K-of-N vote on an explicit negative detection.
+
+    That inference uses the same asymmetric Hysteresis pattern already used
+    for presence/obstruction elsewhere in this app, deliberately lopsided:
+    fast to confirm "on" (a real driving environment has the belt flicker
+    out of view constantly - hand gestures, steering, camera angle - so a
+    momentary re-detection should be trusted quickly), slow to confirm
+    "off" (a real removal is sustained, not a single missed frame).
     """
 
     def __init__(self, window: int = config.YOLO_CONFIRM_WINDOW,
@@ -50,7 +57,11 @@ class DetectionConfirmer:
         self.window = window
         self.min_hits = min_hits
         self._history = {key: deque(maxlen=window) for key in _VOTED_KEYS}
-        self._seatbelt_last_visible_at = None
+        self._seatbelt_hysteresis = utils.Hysteresis(
+            confirm_in=config.SEATBELT_OFF_CONFIRM_SEC,
+            confirm_out=config.SEATBELT_ON_CONFIRM_SEC,
+        )
+        self._seatbelt_ever_seen = False
 
     def update(self, raw_state: dict, now: float) -> dict:
         confirmed = dict(raw_state)
@@ -67,19 +78,16 @@ class DetectionConfirmer:
         return confirmed
 
     def _update_seatbelt(self, raw_value, now: float):
-        if raw_value is True:
-            # An explicit negative ("no_seatbelt"-style) class was matched
-            # this frame - trust it immediately, no need to wait on absence.
-            self._seatbelt_last_visible_at = None
-            return True
-        if raw_value is False:
-            # Belt seen worn this frame.
-            self._seatbelt_last_visible_at = now
-            return False
-        # raw_value is None: no seatbelt-related box this frame at all.
-        if self._seatbelt_last_visible_at is None:
+        if raw_value is not None:
+            self._seatbelt_ever_seen = True
+        # "off" condition this frame: anything except a confirmed sighting
+        # of the belt worn (raw_value is False). Both "nothing detected"
+        # (None) and an explicit negative class (True, if a future dataset
+        # has one) count as "not currently seeing it worn".
+        is_off = self._seatbelt_hysteresis.update(raw_value is not False, now)
+        if not self._seatbelt_ever_seen:
             return None  # never confirmed visible yet - genuinely unknown
-        return (now - self._seatbelt_last_visible_at) >= config.SEATBELT_ABSENCE_INFER_SEC
+        return is_off
 
 
 class YoloDetector:
