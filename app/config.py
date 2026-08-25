@@ -17,11 +17,6 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 YOLO_PRETRAINED_PATH = os.path.join(MODELS_DIR, "yolo11n.pt")   # Phase 8 (COCO pretrained)
 YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (your custom classes)
-# Phase 15: same weights as best.pt, re-exported to NCNN (via training/export.py
-# --format ncnn) for faster CPU inference on the Pi's ARM cores - identical
-# classes/accuracy, just a different backend. Preferred automatically when
-# present; falls back to best.pt untouched if this directory doesn't exist.
-YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_ncnn_model")
 
 # MediaPipe Tasks API models (Phases 2-3). Required since mediapipe 1.0.0
 # removed the old bundled-model mp.solutions API - these are downloaded once
