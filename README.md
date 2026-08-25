@@ -216,7 +216,7 @@ python -m app.main
 | 12 | YOLO evaluation | Script ready (`training/evaluate.py`) - run it to check per-class mAP/precision/recall |
 | 13 | Risk engine | Done - scored, supports combined-condition escalation |
 | 14 | Alert system | Done - voice/TTS + real ESP32 Bluetooth link (`alerts.py`, `esp32/`) |
-| 15 | Raspberry Pi optimization | Export script ready (`training/export.py`); test FPS on-device |
+| 15 | Raspberry Pi optimization | Done - `models/best_ncnn_model/` committed (via `training/export.py --format ncnn`), auto-preferred over `best.pt` when present (see `app/yolo_detector.py`); same weights/accuracy, ~1.6x faster on x86, typically more on Pi ARM NEON - benchmark on-device to confirm |
 
 ## Seatbelt detection: presence-inferred, not a direct read
 
@@ -242,5 +242,12 @@ risk engine treats it as unknown rather than silently assuming "safe".
 3. If you retrain with additional/renamed classes, update
    `datasets/data.yaml` to match and confirm `app/yolo_detector.py`'s
    substring matching still picks them up correctly.
-4. Once on the Raspberry Pi, run `training/export.py --format ncnn` (or onnx)
-   and benchmark FPS to confirm you're hitting the 20+ FPS target.
+4. `models/best_ncnn_model/` is already committed and auto-preferred over
+   `best.pt` (`app/yolo_detector.py` checks `config.YOLO_NCNN_PATH` first) -
+   same weights, just a faster CPU backend, so no config changes needed.
+   On the Pi, run `pip install ncnn` (only needed to load this format) and
+   confirm the console prints "Loaded FINE-TUNED model: ...best_ncnn_model"
+   at startup. If you retrain and get a new `best.pt`, regenerate it with
+   `python training/export.py --format ncnn` and commit the new
+   `best_ncnn_model/` folder, or delete that folder to fall back to `best.pt`
+   directly.

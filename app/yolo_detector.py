@@ -105,7 +105,15 @@ class YoloDetector:
             return
 
         weights_path = None
-        if os.path.exists(config.YOLO_FINETUNED_PATH):
+        if os.path.exists(config.YOLO_NCNN_PATH):
+            # Same weights/classes as best.pt, just a faster CPU backend -
+            # see config.YOLO_NCNN_PATH. ultralytics.YOLO() auto-detects the
+            # NCNN directory format and returns the same Results/Boxes API
+            # (.xyxy/.conf/.cls) as the .pt path below, so nothing else in
+            # this file needs to branch on which backend is loaded.
+            weights_path = config.YOLO_NCNN_PATH
+            self.using_finetuned = True
+        elif os.path.exists(config.YOLO_FINETUNED_PATH):
             weights_path = config.YOLO_FINETUNED_PATH
             self.using_finetuned = True
         elif os.path.exists(config.YOLO_PRETRAINED_PATH):
