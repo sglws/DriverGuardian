@@ -197,12 +197,21 @@ def main():
                 yolo_worker.submit(frame, roi)
             yolo_state = yolo_worker.get_latest()
 
-            # ---- Draw YOLO bounding boxes (raw, ungated detections) ----
-            for x1, y1, x2, y2, label, conf in yolo_state["raw_boxes"]:
+            # ---- Draw YOLO bounding boxes ----
+            # Green = this box cleared its confidence/mouth-proximity gate
+            # and actually fed a phone/drink/etc. flag below. Yellow = the
+            # model drew it, but it never counted for anything (too low
+            # confidence, or - for drink/food/cigarette - not near the
+            # mouth). Distinguishing these on-screen matters: a box that's
+            # merely visible is not the same as one that actually triggered
+            # a warning, and conflating them makes false-positive/negative
+            # reports hard to diagnose.
+            for x1, y1, x2, y2, label, conf, counted in yolo_state["raw_boxes"]:
                 x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 255, 0), 2)
-                cv2.putText(frame, f"{label} {conf:.2f}", (x1, max(y1 - 8, 12)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 2)
+                box_color = (0, 255, 0) if counted else (255, 255, 0)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
             risk, messages, debug = risk_engine.evaluate(
                 now, presence, drowsy_state, pose_state, yolo_state
@@ -241,10 +250,12 @@ def main():
                 f"SEATBELT: {utils.seatbelt_label(yolo_state['seatbelt_off'])} "
                 f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
 
-                # Raw, ungated model output (label:confidence) - diagnostic
-                # visibility into what the model actually sees, before
-                # mouth-proximity gating or K-of-N confirmation are applied.
-                "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}" for *_, lbl, conf in yolo_state["raw_boxes"])
+                # Raw model output (label:confidence, '*' = cleared its gate
+                # and counted toward the flags above) - diagnostic visibility
+                # into what the model actually sees, before K-of-N
+                # confirmation is applied on top.
+                "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
+                                            for *_, lbl, conf, counted in yolo_state["raw_boxes"])
                                   or "(none)"),
 
                 f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
@@ -276,7 +287,8 @@ def main():
                       f"d={pose_state['pitch_delta']:+5.1f} | Yaw={pose_state['yaw_label']:6s} "
                       f"d={pose_state['yaw_delta']:+5.1f} | {' / '.join(messages[:2])}")
                 if yolo_state["raw_boxes"]:
-                    boxes_str = ", ".join(f"{lbl}:{conf:.2f}" for *_, lbl, conf in yolo_state["raw_boxes"])
+                    boxes_str = ", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
+                                           for *_, lbl, conf, counted in yolo_state["raw_boxes"])
                     print(f"    -> YOLO raw: {boxes_str}")
 
             # ---- CSV log ----

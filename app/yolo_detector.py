@@ -144,7 +144,9 @@ class YoloDetector:
             "food": bool,
             "cigarette": bool | None,   # None if class unsupported by current model
             "seatbelt_off": bool | None,
-            "raw_boxes": [(x1,y1,x2,y2,label,conf), ...]
+            "raw_boxes": [(x1,y1,x2,y2,label,conf,counted), ...]  # counted =
+              # this box cleared its confidence/mouth-proximity gate and
+              # actually contributed to the flags above (see detect() below)
           }
         """
         result = {
@@ -183,33 +185,46 @@ class YoloDetector:
                 label = self.class_names.get(cls_idx, str(cls_idx))
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
-                result["raw_boxes"].append((x1, y1, x2, y2, label, conf))
+                # Whether THIS box actually cleared its confidence threshold
+                # (and, for mouth-gated classes, proximity) and fed into the
+                # phone/drink/etc. flags below - vs. merely being a raw guess
+                # the model made that never counted for anything. Surfaced on
+                # the overlay/log (see main.py) so "the model drew a box" and
+                # "the model actually triggered a warning" aren't conflated
+                # when diagnosing false positives/negatives.
+                counted = False
 
                 name = label.lower()
                 if "phone" in name:
-                    if passes("phone", conf):
+                    counted = passes("phone", conf)
+                    if counted:
                         result["phone"] = True
                 elif "drink" in name or "bottle" in name or "cup" in name:
                     if passes("drink", conf):
-                        result["drink"] = result["drink"] or near_mouth((x1, y1, x2, y2))
+                        counted = near_mouth((x1, y1, x2, y2))
+                        result["drink"] = result["drink"] or counted
                 elif "food" in name or "eating" in name:
                     if passes("food", conf):
-                        result["food"] = result["food"] or near_mouth((x1, y1, x2, y2))
+                        counted = near_mouth((x1, y1, x2, y2))
+                        result["food"] = result["food"] or counted
                 elif "cigarette" in name or "smoking" in name:
                     if passes("cigarette", conf):
-                        result["cigarette"] = bool(result["cigarette"]) or near_mouth((x1, y1, x2, y2))
+                        counted = near_mouth((x1, y1, x2, y2))
+                        result["cigarette"] = bool(result["cigarette"]) or counted
                 elif "seatbelt" in name or "belt" in name:
-                    if not passes("seatbelt", conf):
-                        continue
-                    if "no" in name or "off" in name or "unworn" in name:
-                        # Explicit negative class (some datasets have one) -
-                        # trust it directly, this frame.
-                        result["seatbelt_off"] = True
-                    else:
-                        # Plain "Seatbelt" = the belt IS visible/worn this
-                        # frame. DetectionConfirmer infers "off" from
-                        # SUSTAINED absence of this signal, not from here.
-                        result["seatbelt_off"] = False
+                    if passes("seatbelt", conf):
+                        counted = True
+                        if "no" in name or "off" in name or "unworn" in name:
+                            # Explicit negative class (some datasets have one) -
+                            # trust it directly, this frame.
+                            result["seatbelt_off"] = True
+                        else:
+                            # Plain "Seatbelt" = the belt IS visible/worn this
+                            # frame. DetectionConfirmer infers "off" from
+                            # SUSTAINED absence of this signal, not from here.
+                            result["seatbelt_off"] = False
+
+                result["raw_boxes"].append((x1, y1, x2, y2, label, conf, counted))
         else:
             # Fallback: approximate using generic COCO classes (Phase 8 sanity check)
             for box in boxes:
@@ -217,15 +232,20 @@ class YoloDetector:
                 label = self.class_names.get(cls_idx, str(cls_idx))
                 conf = float(box.conf[0])
                 x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
-                result["raw_boxes"].append((x1, y1, x2, y2, label, conf))
+                counted = False
 
                 if label in config.COCO_PHONE_CLASSES:
+                    counted = True
                     result["phone"] = True
                 elif label in config.COCO_DRINK_CLASSES:
-                    result["drink"] = result["drink"] or near_mouth((x1, y1, x2, y2))
+                    counted = near_mouth((x1, y1, x2, y2))
+                    result["drink"] = result["drink"] or counted
                 elif label in config.COCO_FOOD_CLASSES:
-                    result["food"] = result["food"] or near_mouth((x1, y1, x2, y2))
+                    counted = near_mouth((x1, y1, x2, y2))
+                    result["food"] = result["food"] or counted
                 # cigarette / seatbelt stay None - not present in COCO
+
+                result["raw_boxes"].append((x1, y1, x2, y2, label, conf, counted))
 
         return result
 
