@@ -29,7 +29,7 @@ from app.eye_tracker import EyeTracker
 from app.mouth_tracker import MouthTracker
 from app.drowsiness import DrowsinessDetector, DrowsinessLevel
 from app.head_pose import estimate_pose, HeadPoseTracker
-from app.yolo_detector import YoloDetector, DetectionConfirmer
+from app.yolo_detector import YoloDetector, DetectionConfirmer, YoloWorker
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
 
@@ -71,6 +71,7 @@ def main():
     head_pose_tracker = HeadPoseTracker()
     yolo = YoloDetector()
     yolo_confirmer = DetectionConfirmer()
+    yolo_worker = YoloWorker(yolo, yolo_confirmer)
     risk_engine = RiskEngine()
     alerts = AlertSystem()
 
@@ -93,10 +94,6 @@ def main():
     last_console_log = 0.0
     last_csv_log = 0.0
     frame_count = 0
-    cached_yolo_state = {
-        "phone": False, "drink": False, "food": False,
-        "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
-    }
 
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
@@ -197,9 +194,8 @@ def main():
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                raw_yolo_state = yolo.detect(frame, mouth_roi=roi)
-                cached_yolo_state = yolo_confirmer.update(raw_yolo_state, now)
-            yolo_state = cached_yolo_state
+                yolo_worker.submit(frame, roi)
+            yolo_state = yolo_worker.get_latest()
 
             # ---- Draw YOLO bounding boxes (raw, ungated detections) ----
             for x1, y1, x2, y2, label, conf in yolo_state["raw_boxes"]:
@@ -319,6 +315,7 @@ def main():
         presence_detector.close()
         face_mesh.close()
         alerts.close()
+        yolo_worker.close()
         log_file.close()
         print(f"Session log saved: {log_path}")
 
