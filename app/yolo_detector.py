@@ -17,8 +17,6 @@ at all (not in COCO's 80 classes), so those come back as None (meaning
 """
 
 import os
-import threading
-import time
 from collections import deque
 
 from app import config, utils
@@ -228,71 +226,3 @@ class YoloDetector:
                 # cigarette / seatbelt stay None - not present in COCO
 
         return result
-
-
-_EMPTY_YOLO_STATE = {
-    "phone": False, "drink": False, "food": False,
-    "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
-}
-
-
-class YoloWorker:
-    """Runs YoloDetector.detect() + DetectionConfirmer.update() entirely
-    on its own background thread - same pattern as Esp32Link in
-    alerts.py, for the same reason. YOLO inference is synchronous and,
-    with a larger model (e.g. this project's current best.pt, a YOLO26-s
-    checkpoint), can take on the order of a second or more per frame -
-    running that directly in the main video loop freezes camera capture,
-    MediaPipe, and display for the full duration of every inference. The
-    main thread only ever calls submit() and get_latest() (both instant,
-    thread-safe); it never waits on inference itself.
-    """
-
-    def __init__(self, yolo_detector: YoloDetector, confirmer: DetectionConfirmer):
-        self._yolo = yolo_detector
-        self._confirmer = confirmer
-        self._lock = threading.Lock()
-        self._pending = None  # (frame_copy, mouth_roi) or None
-        self._latest_state = dict(_EMPTY_YOLO_STATE)
-        self._stop = False
-        self._new_frame = threading.Event()
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def submit(self, frame, mouth_roi):
-        """Called from the main video loop - instant, never blocks.
-        Copies the frame (the caller keeps drawing on/reusing its own
-        buffer right after this returns) and overwrites any not-yet-
-        started previous submission, since only the latest frame matters."""
-        with self._lock:
-            self._pending = (frame.copy(), mouth_roi)
-        self._new_frame.set()
-
-    def get_latest(self) -> dict:
-        """Called from the main video loop every frame - instant, returns
-        whatever the most recently completed inference produced (the same
-        cached-result pattern already used for the every-Nth-frame
-        cadence, just now also covering however long inference itself
-        takes)."""
-        with self._lock:
-            return self._latest_state
-
-    def close(self):
-        self._stop = True
-        self._new_frame.set()
-
-    def _worker(self):
-        while not self._stop:
-            self._new_frame.wait(timeout=1.0)
-            self._new_frame.clear()
-            if self._stop:
-                break
-            with self._lock:
-                pending, self._pending = self._pending, None
-            if pending is None:
-                continue
-            frame, mouth_roi = pending
-            raw_state = self._yolo.detect(frame, mouth_roi=mouth_roi)
-            confirmed = self._confirmer.update(raw_state, time.time())
-            with self._lock:
-                self._latest_state = confirmed
