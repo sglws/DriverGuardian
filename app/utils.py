@@ -4,9 +4,67 @@ utils.py
 Small shared helper functions used across modules.
 """
 
+import subprocess
 import time
 import cv2
 import numpy as np
+
+# vcgencmd get_throttled bit meanings (Raspberry Pi firmware) - low 4 bits
+# are the CURRENT state, bits 16-19 are "has happened since boot" latches
+# that stay set even after the condition clears, which matters here since
+# the whole point is catching a brief throttling event between two FPS
+# profiling windows that a snapshot alone would miss.
+_THROTTLE_FLAGS = {
+    0: "under-voltage NOW",
+    1: "ARM frequency capped NOW",
+    2: "currently throttled NOW",
+    3: "soft temp limit active NOW",
+    16: "under-voltage occurred since boot",
+    17: "ARM frequency capping occurred since boot",
+    18: "throttling occurred since boot",
+    19: "soft temp limit occurred since boot",
+}
+
+
+def check_pi_thermal_status() -> dict:
+    """Reads CPU temp + throttle state via vcgencmd (Raspberry Pi firmware
+    tool). Sudden, intermittent FPS drops are a classic symptom of thermal
+    throttling or under-voltage - no software fix elsewhere in this app can
+    solve that, it needs a hardware fix (better PSU, heatsink/fan), so it's
+    worth ruling in/out directly rather than guessing from software timing
+    alone.
+
+    Returns {"available": False} on anything but a real Pi (vcgencmd simply
+    doesn't exist elsewhere - e.g. the Windows dev machine this was mostly
+    profiled on this session, which is exactly why this was never actually
+    checked until now).
+    """
+    try:
+        temp_out = subprocess.run(
+            ["vcgencmd", "measure_temp"], capture_output=True, timeout=2, text=True,
+        )
+        throttled_out = subprocess.run(
+            ["vcgencmd", "get_throttled"], capture_output=True, timeout=2, text=True,
+        )
+    except Exception:
+        return {"available": False}
+
+    if temp_out.returncode != 0 or throttled_out.returncode != 0:
+        return {"available": False}
+
+    try:
+        temp_c = float(temp_out.stdout.strip().split("=")[1].rstrip("'C\n"))
+        throttled_bits = int(throttled_out.stdout.strip().split("=")[1], 16)
+    except (IndexError, ValueError):
+        return {"available": False}
+
+    active_flags = [label for bit, label in _THROTTLE_FLAGS.items() if throttled_bits & (1 << bit)]
+    return {
+        "available": True,
+        "temp_c": temp_c,
+        "throttled_bits": throttled_bits,
+        "flags": active_flags,
+    }
 
 
 def euclidean(p1, p2):

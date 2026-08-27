@@ -155,16 +155,7 @@ YOLO_CLASS_CONF_THRESHOLDS = {
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
-YOLO_INFER_EVERY_N_FRAMES = 3     # run YOLO on 1-in-3 frames; reuse last result otherwise
-# PyTorch's CPU backend defaults to using every core for a single predict()
-# call. That's fine in isolation, but YOLO inference now runs on its own
-# background thread (YoloWorker) alongside the main video-loop thread, the
-# ESP32 link thread, the TTS thread, and MediaPipe's own internal thread
-# pool - all real, concurrent CPU work on a 4-core Pi. Left uncapped, torch
-# fights those other threads for every core on every inference call instead
-# of leaving them room to run, which can net LOWER sustained FPS than a
-# smaller thread budget would. Tune alongside core count if this changes.
-YOLO_INFERENCE_THREADS = 2
+YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result otherwise
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
 CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking/smoking detection -> escalate
 SEATBELT_UNWORN_ESCALATE_SEC = 10.0
