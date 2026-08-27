@@ -55,12 +55,12 @@ def setup_csv_logger():
 def main():
     print("Starting DriverGuardian...")
 
-    # WINDOW_NORMAL (resizable) instead of imshow()'s default AUTOSIZE
-    # behavior - AUTOSIZE pins the drawn image at its native pixel size
-    # in the corner when the window manager maximizes/resizes the window,
-    # leaving the rest blank. This makes OpenCV actually scale the frame
-    # to fill whatever size the window ends up at.
-    cv2.namedWindow("DriverGuardian", cv2.WINDOW_NORMAL)
+    # Reverted WINDOW_NORMAL: scaling the frame to fill a resized/maximized
+    # window costs a real resize on every single imshow() call, which on
+    # the Pi's CPU was a steady per-frame tax contributing to the FPS drop.
+    # Back to imshow()'s default AUTOSIZE (1:1 blit, no scaling) - the
+    # window pins at the frame's native size instead of filling whatever
+    # size it's resized to.
 
     camera = Camera()
     presence_detector = PresenceDetector()
@@ -95,15 +95,27 @@ def main():
     last_csv_log = 0.0
     frame_count = 0
 
+    # ---- Per-stage profiling (diagnostic: which stage actually owns the
+    # frame budget). Accumulated and averaged over PROFILE_LOG_INTERVAL_SEC
+    # rather than printed every frame - printing itself isn't free and
+    # would skew the very thing being measured.
+    stage_totals = {"camera": 0.0, "preprocess": 0.0, "mediapipe": 0.0,
+                     "presence_logic": 0.0, "yolo": 0.0, "risk_draw": 0.0,
+                     "display": 0.0}
+    profile_frames = 0
+    last_profile_log = 0.0
+
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
 
     try:
         while True:
+            t_loop_start = time.perf_counter()
             ret, frame = camera.read()
             if not ret:
                 print("Camera read failed - stopping.")
                 break
+            t_camera = time.perf_counter()
 
             h, w = frame.shape[:2]
             now = time.time()
@@ -124,6 +136,7 @@ def main():
                 frame = utils.enhance_low_light(frame)
 
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            t_preprocess = time.perf_counter()
 
             landmarks, drawable = face_mesh.process(rgb_frame)
             face_found = landmarks is not None
@@ -136,6 +149,7 @@ def main():
                 if p is not None:
                     pitch, yaw = p, y_
                 face_mesh.draw(frame, drawable)
+            t_mediapipe = time.perf_counter()
 
             # ---- Calibration phase ----
             if calibrating:
@@ -190,12 +204,14 @@ def main():
            # ---- Run detection pipelines ----
             pose_state = head_pose_tracker.update(pitch, yaw, now)
             drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"], smoothed_mar)
+            t_presence_logic = time.perf_counter()
 
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
                 yolo_worker.submit(frame, roi)
             yolo_state = yolo_worker.get_latest()
+            t_yolo = time.perf_counter()
 
             # ---- Draw YOLO bounding boxes ----
             # Green = this box cleared its confidence/mouth-proximity gate
@@ -304,8 +320,30 @@ def main():
                 ])
                 log_file.flush()
 
+            t_risk_draw = time.perf_counter()
             cv2.imshow("DriverGuardian", frame)
             key = cv2.waitKey(1) & 0xFF
+            t_display = time.perf_counter()
+
+            stage_totals["camera"] += t_camera - t_loop_start
+            stage_totals["preprocess"] += t_preprocess - t_camera
+            stage_totals["mediapipe"] += t_mediapipe - t_preprocess
+            stage_totals["presence_logic"] += t_presence_logic - t_mediapipe
+            stage_totals["yolo"] += t_yolo - t_presence_logic
+            stage_totals["risk_draw"] += t_risk_draw - t_yolo
+            stage_totals["display"] += t_display - t_risk_draw
+            profile_frames += 1
+
+            if now - last_profile_log >= config.PROFILE_LOG_INTERVAL_SEC and profile_frames > 0:
+                last_profile_log = now
+                total = sum(stage_totals.values())
+                avg_fps = profile_frames / total if total > 0 else 0.0
+                breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
+                                      for k, v in stage_totals.items())
+                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
+                stage_totals = {k: 0.0 for k in stage_totals}
+                profile_frames = 0
+
             if key == ord('q'):
                 break
             elif key == ord('r'):

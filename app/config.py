@@ -17,6 +17,13 @@ OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 YOLO_PRETRAINED_PATH = os.path.join(MODELS_DIR, "yolo11n.pt")   # Phase 8 (COCO pretrained)
 YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (your custom classes)
+# Phase 15: same weights as best.pt, exported to NCNN (training/export.py
+# --format ncnn) for faster CPU inference on the Pi's ARM cores - identical
+# classes/accuracy, just a different backend. Preferred automatically when
+# present; falls back to best.pt untouched if this directory doesn't exist.
+# Re-export whenever best.pt changes (this dir doesn't auto-update) - see
+# YOLO_INFERENCE_THREADS below for why net.opt.num_threads gets capped too.
+YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_ncnn_model")
 
 # MediaPipe Tasks API models (Phases 2-3). Required since mediapipe 1.0.0
 # removed the old bundled-model mp.solutions API - these are downloaded once
@@ -143,12 +150,21 @@ YOLO_CONF_THRESHOLD = 0.20
 # problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.20,
-    "drink": 0.65,     # raised further - 0.55 still wasn't enough to stop false positives
+    "drink": 0.55,     # raised further - 0.55 still wasn't enough to stop false positives
     "seatbelt": 0.20,  # already working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 3     # run YOLO on 1-in-3 frames; reuse last result otherwise
+# PyTorch's CPU backend defaults to using every core for a single predict()
+# call. That's fine in isolation, but YOLO inference now runs on its own
+# background thread (YoloWorker) alongside the main video-loop thread, the
+# ESP32 link thread, the TTS thread, and MediaPipe's own internal thread
+# pool - all real, concurrent CPU work on a 4-core Pi. Left uncapped, torch
+# fights those other threads for every core on every inference call instead
+# of leaving them room to run, which can net LOWER sustained FPS than a
+# smaller thread budget would. Tune alongside core count if this changes.
+YOLO_INFERENCE_THREADS = 2
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
 CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking/smoking detection -> escalate
 SEATBELT_UNWORN_ESCALATE_SEC = 10.0
@@ -199,6 +215,7 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 CONSOLE_LOG_INTERVAL_SEC = 0.5
 CSV_LOG_INTERVAL_SEC = 1.0
+PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
 
 # --------------------------------------------------------------------------
 # ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)

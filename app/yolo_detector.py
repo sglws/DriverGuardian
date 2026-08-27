@@ -25,9 +25,23 @@ from app import config, utils
 
 try:
     from ultralytics import YOLO
+    import torch
+    # See config.YOLO_INFERENCE_THREADS - capped so a single predict() call
+    # doesn't oversubscribe the Pi's cores against the other threads now
+    # running alongside it (YoloWorker, Esp32Link, TTS, MediaPipe). Covers
+    # the plain .pt/PyTorch backend; the NCNN backend below (used instead
+    # when config.YOLO_NCNN_PATH exists) has its own separate thread pool,
+    # unaffected by torch.set_num_threads, so it's capped independently.
+    torch.set_num_threads(config.YOLO_INFERENCE_THREADS)
     _ULTRALYTICS_AVAILABLE = True
 except ImportError:
     _ULTRALYTICS_AVAILABLE = False
+
+try:
+    import ncnn as _ncnn
+    _ncnn.set_omp_num_threads(config.YOLO_INFERENCE_THREADS)
+except ImportError:
+    pass  # only installed/needed if a models/best_ncnn_model/ export is actually present
 
 _VOTED_KEYS = ("phone", "drink", "food", "cigarette")
 
@@ -105,7 +119,15 @@ class YoloDetector:
             return
 
         weights_path = None
-        if os.path.exists(config.YOLO_FINETUNED_PATH):
+        if os.path.exists(config.YOLO_NCNN_PATH):
+            # Same weights/classes as best.pt, just a faster CPU backend -
+            # see config.YOLO_NCNN_PATH. ultralytics.YOLO() auto-detects the
+            # NCNN directory format and returns the same Results/Boxes API
+            # (.xyxy/.conf/.cls) as the .pt path below, so nothing else in
+            # this file needs to branch on which backend is loaded.
+            weights_path = config.YOLO_NCNN_PATH
+            self.using_finetuned = True
+        elif os.path.exists(config.YOLO_FINETUNED_PATH):
             weights_path = config.YOLO_FINETUNED_PATH
             self.using_finetuned = True
         elif os.path.exists(config.YOLO_PRETRAINED_PATH):
