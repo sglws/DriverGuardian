@@ -193,7 +193,13 @@ def main():
             # debounced symmetrically via Hysteresis: a single bad frame can't
             # fire an instant autonomous-stop, and a single lucky good frame
             # can't prematurely clear a real ongoing condition.
-            presence_face = presence_detector.detect(rgb_frame)
+            # presence_detector only matters when face_found is already
+            # False (see is_absent below - `and` short-circuits on it
+            # otherwise) - only actually run it then instead of eagerly
+            # every frame, since it's a full BlazeFace inference (~5.5ms)
+            # that's pure waste in the common case (driver present, main
+            # landmarker already found a face).
+            presence_face = presence_detector.detect(rgb_frame) if not face_found else False
             is_obstructed = obstruction_hysteresis.update(std_dev < config.FRAME_STD_BLOCKED_THRESHOLD, now)
             is_absent = presence_hysteresis.update(not face_found and not presence_face, now)
 
@@ -383,6 +389,7 @@ def main():
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
+        alerts.close()
         log_file.close()
         print(f"Session log saved: {log_path}")
 

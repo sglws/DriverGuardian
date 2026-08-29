@@ -21,8 +21,9 @@ YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (you
 # --format ncnn) for faster CPU inference on the Pi's ARM cores - identical
 # classes/accuracy, just a different backend. Preferred automatically when
 # present; falls back to best.pt untouched if this directory doesn't exist.
-# Re-export whenever best.pt changes (this dir doesn't auto-update) - see
-# YOLO_INFERENCE_THREADS below for why net.opt.num_threads gets capped too.
+# Re-export whenever best.pt OR YOLO_IMG_SIZE changes (this dir doesn't
+# auto-update, and a stale export crashes at inference time rather than
+# just running slow - the .param/.bin shape has to match exactly).
 YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_ncnn_model")
 
 # MediaPipe Tasks API models (Phases 2-3). Required since mediapipe 1.0.0
@@ -76,7 +77,14 @@ YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still 
 # --------------------------------------------------------------------------
 # Head pose thresholds (Phase 7)
 # --------------------------------------------------------------------------
-HEAD_LEAN_PITCH_DELTA_DEG = 8.0   # deviation from baseline pitch, either direction
+# Split, not symmetric: a plain 6-point solvePnP pitch estimate is noisier
+# tilting down than up (same underlying landmark foreshortening that makes
+# EAR unreliable past EAR_SUPPRESS_PITCH_DOWN_DEG), and drivers legitimately
+# glance down at the dashboard/phone mount/mirrors far more often than they
+# tilt back - confirmed too sensitive specifically on forward/down lean in
+# practice. Backward/up unchanged at the original value.
+HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 12.0  # forward lean (pitch_delta > this)
+HEAD_LEAN_PITCH_UP_DELTA_DEG = 8.0     # backward lean (pitch_delta < -this)
 
 # A quick mirror check (side/rearview) or a glance at the dash/AC controls is
 # normal, SAFE driving behavior, not distraction - it's usually a moderate
@@ -114,8 +122,8 @@ LEAN_SCORE_CONFIRM_SEC = 0.5
 # Beyond this pitch-down delta, the driver is looking down at the dashboard/
 # phone rather than asleep - eyelid landmarks foreshorten and EAR becomes
 # unreliable, so eye-closure escalation is suppressed in this band. Must be
-# larger than HEAD_LEAN_PITCH_DELTA_DEG so genuine leaning (Case 2) still
-# gets caught independently.
+# larger than HEAD_LEAN_PITCH_DOWN_DELTA_DEG so genuine leaning (Case 2)
+# still gets caught independently.
 EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
 
 # --------------------------------------------------------------------------
@@ -220,6 +228,20 @@ PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real F
 ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
+# HIGH risk re-speaks its warning continuously (not just on change, unlike
+# LOW/MEDIUM) as a deliberate sustained audible alarm. _speak() now runs
+# on its own thread rather than blocking the video loop, but firing a new
+# one every single frame would still be wasteful (and pyttsx3 isn't meant
+# to be driven by overlapping calls) - rate-limited to this cadence
+# instead, still a repeating alarm, just not one fired every frame.
+HIGH_RISK_VOICE_REPEAT_SEC = 3.0
+# Temporary kill switch for isolating TTS's CPU cost from FPS measurements
+# - even non-blocking, the speech thread still does real audio synthesis
+# work concurrently with the main thread while an utterance plays, which
+# can still cost FPS through CPU contention rather than a hard block.
+# Flip back to True once done profiling; [VOICE] text still prints either
+# way so alerts stay visible in the console/log.
+VOICE_ALERTS_ENABLED = False
 ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # don't hammer a failed connection attempt every frame
 ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing down + reconnecting
                                      # (a single slow send is often just a transient hiccup, not a

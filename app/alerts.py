@@ -26,6 +26,7 @@ one client at a time and the two would fight over that single slot.
 import socket
 import subprocess
 import sys
+import threading
 import time
 
 from app.risk_engine import Risk
@@ -53,7 +54,10 @@ except Exception:
 from app import config
 
 
-def _speak(text: str):
+_speak_lock = threading.Lock()
+
+
+def _speak_blocking(text: str):
     if _TTS_AVAILABLE:
         try:
             _tts_engine.say(text)
@@ -64,28 +68,97 @@ def _speak(text: str):
     print(f"[VOICE] {text}")
 
 
+def _speak(text: str):
+    """Fires the actual (potentially multi-second) TTS playback on its own
+    thread. Confirmed on hardware: called synchronously, a sustained
+    HIGH-risk spell (which re-speaks periodically - see
+    AlertSystem.dispatch) froze the whole video loop for the length of
+    every warning, several real seconds each time - rate-limiting alone
+    (below) only reduced how often that happened, not the freeze itself.
+
+    Unlike Esp32Link, there's no shared state here for another thread to
+    read back or a cooldown timer whose ordering can be gotten wrong -
+    fire-and-forget, nothing downstream depends on when/whether it
+    finishes - so this doesn't reopen the class of bug threading caused
+    elsewhere in this app. Skips starting a new utterance if one is
+    already playing rather than overlapping/queuing them, since pyttsx3's
+    engine isn't meant to be driven by concurrent say()/runAndWait() calls
+    - the caller already rate-limits how often this is invoked, so a
+    skipped call just means the driver hears the current warning finish
+    rather than two garbled ones on top of each other.
+    """
+    if not config.VOICE_ALERTS_ENABLED:
+        print(f"[VOICE] (disabled) {text}")
+        return
+    if _speak_lock.locked():
+        return
+
+    def _run():
+        with _speak_lock:
+            _speak_blocking(text)
+
+    threading.Thread(target=_run, daemon=True).start()
+
+
 class Esp32Link:
     """Raw Bluetooth RFCOMM socket link to the ESP32. Connects lazily,
-    retries on a cooldown after a failure rather than blocking the main
-    loop on every frame, and never raises - a disconnected ESP32 shouldn't
-    crash driver monitoring.
+    retries on a cooldown after a failure rather than blocking on every
+    frame, and never raises - a disconnected ESP32 shouldn't crash driver
+    monitoring.
 
-    Runs synchronously on the main video-loop thread. A reconnect attempt
+    Runs entirely on its own background thread. A reconnect attempt
     (bluetoothctl priming + a 2s settle + a blocking socket connect()) can
-    legitimately take 10+ seconds when the ESP32 is unreachable, freezing
-    frame processing for that long when it happens - but only once per
-    ESP32_RECONNECT_COOLDOWN_SEC, not on every subsequent frame:
-    _last_attempt is stamped *after* the attempt completes, not before,
-    which is what makes that cooldown actually hold. Stamping it before
-    let a single slow attempt outlast the cooldown itself, so the very
-    next frame would immediately block on another attempt too - confirmed
-    root cause of a ~0.1 FPS regression on this hardware.
+    legitimately take several real seconds when the ESP32 is unreachable
+    (confirmed on Windows: a failed connect() alone can take multiple
+    seconds to time out) - even properly cooldown-gated (see
+    _last_attempt below), a still-synchronous version freezes frame
+    processing for that long *every time* it fires, which is a real,
+    recurring stutter, not a one-off.
+
+    This is a deliberate, narrow exception to this app's general "no
+    background threads" rule (see YoloWorker's removal), not a reversal
+    of it: unlike YOLO inference, this thread is I/O-bound (waiting on a
+    socket/subprocess), not CPU-bound - it spends nearly all its time
+    asleep or blocked on the network, so it doesn't compete with NCNN for
+    CPU cores the way a compute-heavy worker thread did. And unlike the
+    original threaded version of this class, the main thread here never
+    reads any state back out of this object mid-frame (set_state() is
+    fire-and-forget, same as _speak()) - so there's no equivalent of the
+    cooldown-ordering bug that caused the original 0.1 FPS regression;
+    _last_attempt is still stamped *after* the attempt completes purely
+    for correctness (an attempt that outlasts the cooldown shouldn't
+    immediately trigger another one), not because anything on the main
+    thread depends on that ordering anymore.
     """
 
     def __init__(self):
         self._sock = None
         self._last_attempt = 0.0
         self._consecutive_send_failures = 0
+        self._lock = threading.Lock()
+        self._pending_risk = "SAFE"
+        self._pending_case = "NONE"
+        self._stop = False
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def set_state(self, risk_name: str, case: str):
+        """Called from the main video loop every frame - instant,
+        thread-safe, never touches the network. Just records the latest
+        desired state for the background worker to pick up."""
+        with self._lock:
+            self._pending_risk = risk_name
+            self._pending_case = case
+
+    def close(self):
+        self._stop = True
+
+    def _worker(self):
+        while not self._stop:
+            with self._lock:
+                risk_name, case = self._pending_risk, self._pending_case
+            self._send_once(risk_name, case)
+            time.sleep(config.ESP32_SEND_INTERVAL_SEC)
 
     def _prime_acl_link(self):
         """A cold raw RFCOMM socket connect() to this ESP32 reliably fails
@@ -163,7 +236,8 @@ class Esp32Link:
             self._last_attempt = time.time()
         return self._sock
 
-    def send(self, risk_name: str, case: str):
+    def _send_once(self, risk_name: str, case: str):
+        """Runs on the background worker thread only - see _worker()."""
         line = f"{risk_name},{case}\n"
         sock = self._ensure_open()
         if sock is None:
@@ -198,14 +272,18 @@ class Esp32Link:
 
 class AlertSystem:
     """Tracks last-fired risk tier so voice/dashboard don't spam every
-    frame, and rate-limits the ESP32 link to ESP32_SEND_INTERVAL_SEC
-    (its own heartbeat cadence - see Esp32Link/esp32/ sketch docstrings).
+    frame. The ESP32 link paces its own sends on its own background
+    thread (ESP32_SEND_INTERVAL_SEC) - dispatch() just hands it the
+    latest state every frame, which is instant and never blocks.
     """
 
     def __init__(self):
         self._last_risk = None
-        self._last_esp32_send = 0.0
+        self._last_high_speak = 0.0
         self._esp32 = Esp32Link()
+
+    def close(self):
+        self._esp32.close()
 
     def dispatch(self, risk: Risk, messages: list[str], case: str = "NONE"):
         now = time.time()
@@ -222,12 +300,19 @@ class AlertSystem:
             if changed:
                 _speak(messages[0] if messages else "Warning: please pay attention.")
         elif risk == Risk.HIGH:
-            _speak(messages[0] if messages else "Warning. Please respond immediately.")
+            # Deliberately NOT gated by `changed` alone like LOW/MEDIUM -
+            # HIGH re-speaks continuously as a sustained alarm for as long
+            # as the danger persists. But _speak() blocks the video loop
+            # for the length of the utterance, so it's rate-limited to
+            # HIGH_RISK_VOICE_REPEAT_SEC instead of firing every frame -
+            # still a repeating alarm, just not one that stalls frame
+            # processing faster than it can finish speaking.
+            if changed or now - self._last_high_speak >= config.HIGH_RISK_VOICE_REPEAT_SEC:
+                self._last_high_speak = now
+                _speak(messages[0] if messages else "Warning. Please respond immediately.")
             if changed:
                 print("[DASHBOARD] HIGH RISK ALERT -", " / ".join(messages))
 
         # The ESP32 gets every risk tier, including SAFE - it needs the
         # continuous stream to tell "still SAFE" apart from "link down".
-        if now - self._last_esp32_send >= config.ESP32_SEND_INTERVAL_SEC:
-            self._last_esp32_send = now
-            self._esp32.send(risk.name, case)
+        self._esp32.set_state(risk.name, case)

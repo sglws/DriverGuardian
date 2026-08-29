@@ -97,9 +97,9 @@ class HeadPoseTracker:
         yaw_delta = yaw - self.baseline_yaw
 
         # ---- Direction labels ----
-        if pitch_delta > config.HEAD_LEAN_PITCH_DELTA_DEG:
+        if pitch_delta > config.HEAD_LEAN_PITCH_DOWN_DELTA_DEG:
             pitch_label = "DOWN"
-        elif pitch_delta < -config.HEAD_LEAN_PITCH_DELTA_DEG:
+        elif pitch_delta < -config.HEAD_LEAN_PITCH_UP_DELTA_DEG:
             pitch_label = "UP/BACK"
         else:
             pitch_label = "FORWARD"
