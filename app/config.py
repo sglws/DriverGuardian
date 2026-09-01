@@ -42,6 +42,17 @@ FRAME_HEIGHT = 720
 TARGET_FPS_MIN = 20     # non-functional requirement floor
 TARGET_FPS_PREFERRED = 30
 
+# When False: skips all drawing (face mesh dots, YOLO boxes, text panel)
+# and the cv2.imshow()/waitKey() window entirely - camera, MediaPipe,
+# YOLO, risk logic, and console/CSV logging all still run normally.
+# Originally scoped as a production/no-preview-needed deployment option;
+# currently doubling as a diagnostic toggle to isolate whether a reported
+# system-wide freeze (CPU and RAM both already ruled out) is coming from
+# the camera/ISP path or from cv2.imshow()/compositor rendering - if the
+# freeze still happens with this False, it's not about the display.
+# No 'r' recalibration key when False (see main.py); quit via Ctrl+C.
+DISPLAY_ENABLED = True
+
 # --------------------------------------------------------------------------
 # Calibration
 # --------------------------------------------------------------------------

@@ -174,7 +174,8 @@ def main():
                 p, y_, _ = estimate_pose(landmarks, w, h)
                 if p is not None:
                     pitch, yaw = p, y_
-                face_mesh.draw(frame, drawable)
+                if config.DISPLAY_ENABLED:
+                    face_mesh.draw(frame, drawable)
             t_mediapipe = time.perf_counter()
 
             # ---- Calibration phase ----
@@ -187,8 +188,9 @@ def main():
                     calib_pitch.append(pitch)
                     calib_yaw.append(yaw)
                     elapsed = now - calibration_start
-                    cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
+                    if config.DISPLAY_ENABLED:
+                        cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
+                                    (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
                         baseline_ear = float(np.median(calib_ear))
                         baseline_mar = float(np.median(calib_mar))
@@ -200,13 +202,14 @@ def main():
                         calibrating = False
                         print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
-                else:
+                elif config.DISPLAY_ENABLED:
                     cv2.putText(frame, "Waiting for face to calibrate...",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-                cv2.imshow("DriverGuardian", frame)
-                if cv2.waitKey(1) & 0xFF == ord('q'):
-                    break
+                if config.DISPLAY_ENABLED:
+                    cv2.imshow("DriverGuardian", frame)
+                    if cv2.waitKey(1) & 0xFF == ord('q'):
+                        break
                 continue
 
             # ---- Presence classification (Phase 2 functional requirement) ----
@@ -255,12 +258,13 @@ def main():
             # merely visible is not the same as one that actually triggered
             # a warning, and conflating them makes false-positive/negative
             # reports hard to diagnose.
-            for x1, y1, x2, y2, label, conf, counted in yolo_state["raw_boxes"]:
-                x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                box_color = (0, 255, 0) if counted else (255, 255, 0)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-                cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+            if config.DISPLAY_ENABLED:
+                for x1, y1, x2, y2, label, conf, counted in yolo_state["raw_boxes"]:
+                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
+                    box_color = (0, 255, 0) if counted else (255, 255, 0)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
+                    cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
             risk, messages, debug = risk_engine.evaluate(
                 now, presence, drowsy_state, pose_state, yolo_state
@@ -269,63 +273,65 @@ def main():
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
-            cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
+            if config.DISPLAY_ENABLED:
+                cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
+                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
 
-            panel = [
-                f"Eyes: {'CLOSED' if drowsy_state['eye_closed'] else 'OPEN'}  "
-                f"EAR={smoothed_ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
-                f"closed {drowsy_state['closed_elapsed']:.1f}s  level={drowsy_state['level'].name}"
-                f"{'  [looking down - EAR suppressed]' if drowsy_state['looking_down'] else ''}",
+                panel = [
+                    f"Eyes: {'CLOSED' if drowsy_state['eye_closed'] else 'OPEN'}  "
+                    f"EAR={smoothed_ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
+                    f"closed {drowsy_state['closed_elapsed']:.1f}s  level={drowsy_state['level'].name}"
+                    f"{'  [looking down - EAR suppressed]' if drowsy_state['looking_down'] else ''}",
 
-                f"Head pitch: {pose_state['pitch_label']}  d={pose_state['pitch_delta']:+.1f} deg  "
-                f"lean {pose_state['lean_elapsed']:.1f}s",
+                    f"Head pitch: {pose_state['pitch_label']}  d={pose_state['pitch_delta']:+.1f} deg  "
+                    f"lean {pose_state['lean_elapsed']:.1f}s",
 
-                f"Head yaw: {pose_state['yaw_label']} ({pose_state['yaw_zone']})  d={pose_state['yaw_delta']:+.1f} deg  "
-                f"turn {pose_state['turn_elapsed']:.1f}s  risk={pose_state['turn_risk']}",
+                    f"Head yaw: {pose_state['yaw_label']} ({pose_state['yaw_zone']})  d={pose_state['yaw_delta']:+.1f} deg  "
+                    f"turn {pose_state['turn_elapsed']:.1f}s  risk={pose_state['turn_risk']}",
 
-                f"Blinks/{config.BLINK_WINDOW_SEC:.0f}s: {drowsy_state['blink_rate']}  "
-                f"Total: {drowsy_state['total_blinks']}",
+                    f"Blinks/{config.BLINK_WINDOW_SEC:.0f}s: {drowsy_state['blink_rate']}  "
+                    f"Total: {drowsy_state['total_blinks']}",
 
-                f"Mouth: {'OPEN' if drowsy_state['mouth_open'] else 'CLOSED'}  "
-                f"MAR={smoothed_mar:.2f} (thr>{drowsiness.open_mouth_threshold:.2f})  "
-                f"open {drowsy_state['open_elapsed']:.1f}s  "
-                f"Yawns/{config.YAWN_RATE_WINDOW_SEC:.0f}s: {drowsy_state['yawn_rate']}  "
-                f"Total: {drowsy_state['total_yawns']}"
-                f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
+                    f"Mouth: {'OPEN' if drowsy_state['mouth_open'] else 'CLOSED'}  "
+                    f"MAR={smoothed_mar:.2f} (thr>{drowsiness.open_mouth_threshold:.2f})  "
+                    f"open {drowsy_state['open_elapsed']:.1f}s  "
+                    f"Yawns/{config.YAWN_RATE_WINDOW_SEC:.0f}s: {drowsy_state['yawn_rate']}  "
+                    f"Total: {drowsy_state['total_yawns']}"
+                    f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
 
-                f"YOLO: phone={yolo_state['phone']} consumption={yolo_state['consumption']} "
-                f"cigarette={yolo_state['cigarette']} "
-                f"SEATBELT: {utils.seatbelt_label(yolo_state['seatbelt_off'])} "
-                f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
+                    f"YOLO: phone={yolo_state['phone']} consumption={yolo_state['consumption']} "
+                    f"cigarette={yolo_state['cigarette']} "
+                    f"SEATBELT: {utils.seatbelt_label(yolo_state['seatbelt_off'])} "
+                    f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
 
-                # Raw model output (label:confidence, '*' = cleared its gate
-                # and counted toward the flags above) - diagnostic visibility
-                # into what the model actually sees, before K-of-N
-                # confirmation is applied on top.
-                "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
-                                            for *_, lbl, conf, counted in yolo_state["raw_boxes"])
-                                  or "(none)"),
+                    # Raw model output (label:confidence, '*' = cleared its gate
+                    # and counted toward the flags above) - diagnostic visibility
+                    # into what the model actually sees, before K-of-N
+                    # confirmation is applied on top.
+                    "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
+                                                for *_, lbl, conf, counted in yolo_state["raw_boxes"])
+                                      or "(none)"),
 
-                f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
-            ]
-            y = 58
-            for line in panel:
-                cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
-                y += 19
+                    f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
+                ]
+                y = 58
+                for line in panel:
+                    cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+                    y += 19
 
-            y += 8
-            for m in messages[:4]:
-                cv2.putText(frame, m, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
-                y += 22
+                y += 8
+                for m in messages[:4]:
+                    cv2.putText(frame, m, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+                    y += 22
 
             curr_time = time.time()
             fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
             prev_time = curr_time
-            cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+            if config.DISPLAY_ENABLED:
+                cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
             # ---- Console live log ----
             if now - last_console_log >= config.CONSOLE_LOG_INTERVAL_SEC:
@@ -354,8 +360,15 @@ def main():
                 log_file.flush()
 
             t_risk_draw = time.perf_counter()
-            cv2.imshow("DriverGuardian", frame)
-            key = cv2.waitKey(1) & 0xFF
+            if config.DISPLAY_ENABLED:
+                cv2.imshow("DriverGuardian", frame)
+                key = cv2.waitKey(1) & 0xFF
+            else:
+                # No window, no keyboard input possible - quit via Ctrl+C
+                # (already works, propagates as KeyboardInterrupt through
+                # the `finally` cleanup block below) and recalibration only
+                # happens once at startup, not re-triggerable mid-session.
+                key = 0xFF
             t_display = time.perf_counter()
 
             stage_totals["camera"] += t_camera - t_loop_start
