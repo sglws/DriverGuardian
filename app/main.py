@@ -361,7 +361,8 @@ def main():
 
             t_risk_draw = time.perf_counter()
             if config.DISPLAY_ENABLED:
-                cv2.imshow("DriverGuardian", frame)
+                if frame_count % config.DISPLAY_EVERY_N_FRAMES == 0:
+                    cv2.imshow("DriverGuardian", frame)
                 key = cv2.waitKey(1) & 0xFF
             else:
                 # No window, no keyboard input possible - quit via Ctrl+C

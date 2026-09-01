@@ -52,6 +52,20 @@ TARGET_FPS_PREFERRED = 30
 # freeze still happens with this False, it's not about the display.
 # No 'r' recalibration key when False (see main.py); quit via Ctrl+C.
 DISPLAY_ENABLED = True
+# How many processed frames per actual cv2.imshow() call - 1 means every
+# frame (default, no behavior change). This app's Qt build has no OpenGL
+# support (confirmed via cv2.getBuildInformation()), so every displayed
+# frame is a full 1280x720 software-rendered push into the compositor -
+# forcing XWayland instead of native Wayland didn't fix a reported freeze,
+# which (combined with cv2.imshow() itself always timing fast in
+# [PROFILE] - "display" stage - even during a freeze) points at the
+# compositor's own async rendering of what gets handed to it, not the
+# handoff itself. Showing fewer, not smaller, frames tests whether cutting
+# that sustained software-rendering load reduces how often it happens.
+# cv2.waitKey() still runs every frame regardless (see main.py) - it
+# processes GUI/keyboard events for the window, unrelated to whether a
+# new frame was actually pushed that iteration.
+DISPLAY_EVERY_N_FRAMES = 1
 
 # --------------------------------------------------------------------------
 # Calibration

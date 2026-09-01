@@ -39,20 +39,23 @@ class Camera:
             # add a cv2.cvtColor(..., COLOR_RGB2BGR) here; that would
             # re-flip already-correct channels. See:
             # https://github.com/raspberrypi/picamera2/issues/260
-            # buffer_count intentionally kept low: picamera2's default is
-            # tuned for smooth continuous capture assuming the consumer
-            # keeps pace with the sensor's native rate. This app can't -
-            # it processes at ~18fps while the sensor captures faster -
-            # so a deeper queue means capture_array() keeps handing back
-            # a technically-fresh-looking call that's actually returning
-            # an increasingly stale frame from the back of a growing
-            # backlog (a latency problem invisible to a throughput/FPS
-            # measurement - "camera=3.1ms" only times the call itself,
-            # not the age of the frame it returns). Same fix in spirit as
-            # CAP_PROP_BUFFERSIZE=1 on the cv2.VideoCapture path below.
+            # buffer_count=2 (tried first to fix a latency/staleness issue -
+            # see git history) turned out too shallow: confirmed via
+            # `dmesg -w` that the CSI link was periodically restarting
+            # ("rp1-cfe ...: Using a link rate of 912 Mbps" appearing
+            # minutes into uptime, not just at boot) - a classic symptom of
+            # the buffer queue underrunning when this app's consumer loop
+            # is ever briefly slower than the sensor (e.g. during YOLO's
+            # own periodic inference spike), triggering libcamera's stream
+            # recovery. capture_array() blocks until that recovery
+            # finishes, which read as "everything freezes for a few
+            # seconds" - a camera-driver stall, not a display/CPU/RAM
+            # issue like everything else already ruled out for that same
+            # symptom. 4 trades a little of the latency fix back for a
+            # deeper cushion against underrun-triggered restarts.
             video_config = self.picam2.create_video_configuration(
                 main={"size": (width, height), "format": "RGB888"},
-                buffer_count=2,
+                buffer_count=4,
             )
             self.picam2.configure(video_config)
             self.picam2.start()
