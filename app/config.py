@@ -168,9 +168,14 @@ YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result
 # inference call. On the Pi that starves the desktop session itself -
 # window manager, compositor, mouse cursor - of CPU time each time YOLO
 # runs, not just this app (confirmed: "whole system freezes, even moving
-# the mouse" while running with a live desktop session). Leave one core
-# free for the OS/desktop rather than trying to claim all of them.
-YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 1)
+# the mouse" while running with a live desktop session). Leaving only 1
+# core free (cpu_count - 1) still left visible compositor stalls - checked
+# mediapipe 0.10.14's BaseOptions directly (no num_threads exposed in this
+# version's Python API, only a CPU/GPU delegate choice), so MediaPipe's own
+# per-frame thread usage can't be capped the same way; leaving 2 cores free
+# instead gives the compositor more room to coexist with whatever MediaPipe
+# is doing on its own, uncapped, every single frame.
+YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 2)
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
 CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking/smoking detection -> escalate
 SEATBELT_UNWORN_ESCALATE_SEC = 10.0
