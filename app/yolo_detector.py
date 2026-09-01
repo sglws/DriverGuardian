@@ -23,9 +23,22 @@ from app import config, utils
 
 try:
     from ultralytics import YOLO
+    import torch
+    # See config.YOLO_INFERENCE_THREADS - left uncapped, a single predict()
+    # call grabs every CPU core for its duration, which starves the
+    # desktop session itself (window manager, mouse cursor) on the Pi, not
+    # just this app. Covers the plain .pt/PyTorch backend; the NCNN
+    # backend below has its own separate thread pool, capped independently.
+    torch.set_num_threads(config.YOLO_INFERENCE_THREADS)
     _ULTRALYTICS_AVAILABLE = True
 except ImportError:
     _ULTRALYTICS_AVAILABLE = False
+
+try:
+    import ncnn as _ncnn
+    _ncnn.set_omp_num_threads(config.YOLO_INFERENCE_THREADS)
+except ImportError:
+    pass  # only installed/needed if a models/best_ncnn_model/ export is actually present
 
 _VOTED_KEYS = ("phone", "consumption", "cigarette")
 

@@ -198,6 +198,45 @@ python -m app.main
   under `logs/`.
 - Press `r` to recalibrate at any time, `q` to quit.
 
+## Run at boot
+
+`systemd/driverguardian.service` runs the app automatically once the Pi
+boots to the desktop, and restarts it if it ever crashes mid-drive instead
+of leaving monitoring silently dead. It's a **systemd `--user` service**
+(not a system-level one) specifically so it starts inside the desktop
+auto-login session and correctly inherits `DISPLAY`/`XAUTHORITY` for
+`cv2.imshow()` - a system-level unit would need those set manually and
+tends to fight the GUI session for camera/display access.
+
+Requires desktop auto-login enabled (`sudo raspi-config` -> System Options
+-> Boot / Auto Login -> Desktop Autologin).
+
+```bash
+# Edit WorkingDirectory/ExecStart in the unit file first if your repo
+# isn't cloned to ~/DriverGuardian
+mkdir -p ~/.config/systemd/user
+cp systemd/driverguardian.service ~/.config/systemd/user/
+loginctl enable-linger "$USER"   # lets the user service start at login, not just when you SSH in
+systemctl --user daemon-reload
+systemctl --user enable --now driverguardian.service
+```
+
+Check on it:
+
+```bash
+systemctl --user status driverguardian.service
+journalctl --user -u driverguardian.service -f   # live log tail
+```
+
+To stop it starting at boot (e.g. while actively debugging):
+
+```bash
+systemctl --user disable --now driverguardian.service
+```
+
+Don't also run a separate service that connects to the ESP32 - see the
+Bluetooth section above for why.
+
 ## Phase status
 
 | Phase | Deliverable | Status |

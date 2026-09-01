@@ -164,6 +164,13 @@ YOLO_CLASS_CONF_THRESHOLDS = {
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result otherwise
+# Uncapped, NCNN/torch grab every CPU core for the duration of each
+# inference call. On the Pi that starves the desktop session itself -
+# window manager, compositor, mouse cursor - of CPU time each time YOLO
+# runs, not just this app (confirmed: "whole system freezes, even moving
+# the mouse" while running with a live desktop session). Leave one core
+# free for the OS/desktop rather than trying to claim all of them.
+YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 1)
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
 CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking/smoking detection -> escalate
 SEATBELT_UNWORN_ESCALATE_SEC = 10.0
