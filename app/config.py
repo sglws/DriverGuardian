@@ -274,6 +274,17 @@ PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real F
 # Fill in your ESP32's actual MAC address (`bluetoothctl devices` after
 # pairing, or read it off the ESP32's own Serial Monitor output at boot).
 ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
+# Kill switch for dev machines without the real ESP32 nearby (e.g. a
+# laptop). Esp32Link is deliberately synchronous (see its docstring - a
+# background thread here caused a proven, severe freeze on the Pi), which
+# means a reconnect attempt blocks the main loop for however long
+# connect() takes to fail when unreachable - confirmed on Windows, that's
+# multiple real seconds (WinError 10060), recurring every
+# ESP32_RECONNECT_COOLDOWN_SEC. That's an accepted, documented cost on
+# the Pi where the ESP32 is actually present, but pure waste on a machine
+# that will never have one nearby. False skips Esp32Link entirely -
+# dispatch() logs what it would have sent instead of touching the socket.
+ESP32_LINK_ENABLED = False
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
 # HIGH risk re-speaks its warning continuously (not just on change, unlike

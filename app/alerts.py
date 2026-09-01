@@ -159,7 +159,7 @@ class Esp32Link:
     def _ensure_open(self):
         if self._sock is not None:
             return self._sock
-        if not _BLUETOOTH_SOCKETS_AVAILABLE:
+        if not config.ESP32_LINK_ENABLED or not _BLUETOOTH_SOCKETS_AVAILABLE:
             return None
 
         now = time.time()
