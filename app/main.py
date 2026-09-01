@@ -21,6 +21,29 @@ from collections import deque
 import cv2
 import numpy as np
 
+# Reserve one CPU core exclusively for the desktop compositor/window
+# manager, enforced at the OS scheduling level - not a request to any
+# individual library. Capping YOLO's own thread pool (torch/ncnn) helped
+# but didn't fully stop the screen freezing on the Pi, because MediaPipe's
+# TFLite delegate can't be thread-capped through its public Python API
+# (checked directly: BaseOptions only exposes a CPU/GPU delegate choice,
+# no num_threads) and runs on every single frame, not just every-Nth like
+# YOLO. CPU affinity sidesteps needing every library to cooperate: no
+# thread of this process, no matter which library spawned it, can ever be
+# scheduled onto a reserved core. Set before importing anything that
+# spins up its own thread pool (mediapipe/torch/ncnn below), though the
+# OS enforces this for the process's whole lifetime regardless of import
+# order. No-ops on Windows (sched_setaffinity is Linux-only) and on a
+# dev/CI machine with 2 or fewer cores, where reserving one wouldn't
+# leave enough for the app itself.
+if hasattr(os, "sched_setaffinity"):
+    _all_cpus = os.sched_getaffinity(0)
+    if len(_all_cpus) > 2:
+        _reserved_cpu = max(_all_cpus)
+        os.sched_setaffinity(0, _all_cpus - {_reserved_cpu})
+        print(f"[main] Reserved CPU core {_reserved_cpu} for the desktop session "
+              f"(app restricted to {sorted(_all_cpus - {_reserved_cpu})})")
+
 from app import config, utils
 from app.camera import Camera
 from app.face_detector import PresenceDetector
