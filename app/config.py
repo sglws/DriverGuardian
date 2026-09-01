@@ -260,7 +260,10 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
-CONSOLE_LOG_INTERVAL_SEC = 0.5
+CONSOLE_LOG_INTERVAL_SEC = 5.0  # temporarily stretched from 0.5 to test whether remote-terminal
+                                 # print() latency (Pi Connect's shell is network-based, not local)
+                                 # is the cause of a reported ~0.5s-cadence stutter - revert to 0.5
+                                 # once confirmed/ruled out
 CSV_LOG_INTERVAL_SEC = 1.0
 PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
 
