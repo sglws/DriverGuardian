@@ -392,6 +392,18 @@ def main():
                     else:
                         print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  no throttling")
 
+                # Same cadence, same reasoning: a process blocked swapping
+                # in from a slow SD card doesn't need a CPU core, so it's
+                # invisible to CPU-affinity/thread-cap fixes but produces
+                # the exact same "everything freezes, then catches up"
+                # symptom - rule it in/out directly instead of guessing.
+                mem = utils.check_memory_status()
+                if mem["available"]:
+                    swap_note = (f"SWAPPING {mem['swap_used_mb']:.0f}/{mem['swap_total_mb']:.0f}MB"
+                                 if mem["swap_used_mb"] > 1.0 else "no swap use")
+                    print(f"[MEMORY] used={mem['mem_used_pct']:.0f}% "
+                          f"available={mem['mem_available_mb']:.0f}MB  {swap_note}")
+
             if key == ord('q'):
                 break
             elif key == ord('r'):

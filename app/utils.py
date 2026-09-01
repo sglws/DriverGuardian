@@ -67,6 +67,50 @@ def check_pi_thermal_status() -> dict:
     }
 
 
+def check_memory_status() -> dict:
+    """Reads RAM/swap usage from /proc/meminfo. A process blocked on a page
+    fault swapping in from a slow SD card doesn't need a CPU core at all -
+    invisible to any CPU-affinity/thread-cap fix, and a classic cause of
+    exactly "everything freezes for a few seconds then catches up at once"
+    on a memory-constrained embedded Linux box. Worth ruling in/out
+    directly once CPU contention has actually been ruled out, rather than
+    guessing at more CPU-side fixes.
+
+    Returns {"available": False} off Linux (e.g. the Windows dev machine
+    this was mostly profiled on this session).
+    """
+    try:
+        with open("/proc/meminfo") as f:
+            raw = f.read()
+    except Exception:
+        return {"available": False}
+
+    fields = {}
+    for line in raw.splitlines():
+        parts = line.split(":")
+        if len(parts) != 2:
+            continue
+        key = parts[0].strip()
+        if key in ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree"):
+            try:
+                fields[key] = int(parts[1].strip().split()[0])  # kB
+            except (IndexError, ValueError):
+                return {"available": False}
+
+    if len(fields) != 4:
+        return {"available": False}
+
+    mem_used_pct = 100.0 * (1 - fields["MemAvailable"] / fields["MemTotal"]) if fields["MemTotal"] else 0.0
+    swap_used_mb = (fields["SwapTotal"] - fields["SwapFree"]) / 1024.0
+    return {
+        "available": True,
+        "mem_used_pct": mem_used_pct,
+        "mem_available_mb": fields["MemAvailable"] / 1024.0,
+        "swap_used_mb": swap_used_mb,
+        "swap_total_mb": fields["SwapTotal"] / 1024.0,
+    }
+
+
 def euclidean(p1, p2):
     """Euclidean distance between two (x, y) points."""
     return float(np.linalg.norm(np.array(p1) - np.array(p2)))
