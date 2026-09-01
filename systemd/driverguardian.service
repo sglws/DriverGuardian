@@ -1,0 +1,22 @@
+[Unit]
+# Runs as a systemd --user service (see README "Run at boot") so it starts
+# inside the desktop auto-login session and inherits DISPLAY/XAUTHORITY
+# correctly - a system-level unit would need those set manually and is
+# more prone to fighting the GUI session for camera/display access.
+Description=DriverGuardian driver monitoring system
+After=graphical-session.target
+Wants=graphical-session.target
+
+[Service]
+Type=simple
+# EDIT this to wherever you cloned the repo on the Pi:
+WorkingDirectory=%h/DriverGuardian
+ExecStart=%h/DriverGuardian/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=5
+# Only the app itself should ever hold the ESP32 Bluetooth connection (see
+# README) - restarting on failure keeps that true even if it crashes,
+# instead of leaving driver monitoring silently dead until next reboot.
+
+[Install]
+WantedBy=graphical-session.target

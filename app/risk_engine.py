@@ -147,7 +147,7 @@ class RiskEngine:
                 case_candidates.append((5, "PHONE"))
         self.phone_prev_active = phone_active
 
-        consumption_active = bool(yolo_state.get("drink") or yolo_state.get("food") or yolo_state.get("cigarette"))
+        consumption_active = bool(yolo_state.get("consumption") or yolo_state.get("cigarette"))
         if consumption_active:
             score += 1
             if not self.consumption_prev_active:

@@ -27,7 +27,7 @@ try:
 except ImportError:
     _ULTRALYTICS_AVAILABLE = False
 
-_VOTED_KEYS = ("phone", "drink", "food", "cigarette")
+_VOTED_KEYS = ("phone", "consumption", "cigarette")
 
 
 class DetectionConfirmer:
@@ -143,11 +143,13 @@ class YoloDetector:
         (not mouth-specific per the spec). When `mouth_roi` is None (e.g. no
         face this frame), consumption classes fall back to ungated detection.
 
+        Drinking and Eating are merged into one "consumption" flag - see
+        the merge note by COCO_CONSUMPTION_CLASSES in config.py for why.
+
         Returns a dict:
           {
             "phone": bool,
-            "drink": bool,
-            "food": bool,
+            "consumption": bool,        # Drinking OR Eating, merged
             "cigarette": bool | None,   # None if class unsupported by current model
             "seatbelt_off": bool | None,
             "raw_boxes": [(x1,y1,x2,y2,label,conf,counted), ...]  # counted =
@@ -156,7 +158,7 @@ class YoloDetector:
           }
         """
         result = {
-            "phone": False, "drink": False, "food": False,
+            "phone": False, "consumption": False,
             "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
         }
         if not self.available:
@@ -185,7 +187,8 @@ class YoloDetector:
 
         if self.using_finetuned:
             # Your custom class names from data.yaml (Phase 9-11), e.g.
-            # ["phone", "seatbelt", "cigarette", "food", "drink"]
+            # ["Phone", "Seatbelt", "Smoking", "Eating", "Drinking"] -
+            # Eating/Drinking both feed the merged "consumption" flag below.
             for box in boxes:
                 cls_idx = int(box.cls[0])
                 label = self.class_names.get(cls_idx, str(cls_idx))
@@ -193,11 +196,11 @@ class YoloDetector:
                 x1, y1, x2, y2 = [float(v) for v in box.xyxy[0]]
                 # Whether THIS box actually cleared its confidence threshold
                 # (and, for mouth-gated classes, proximity) and fed into the
-                # phone/drink/etc. flags below - vs. merely being a raw guess
-                # the model made that never counted for anything. Surfaced on
-                # the overlay/log (see main.py) so "the model drew a box" and
-                # "the model actually triggered a warning" aren't conflated
-                # when diagnosing false positives/negatives.
+                # phone/consumption/etc. flags below - vs. merely being a raw
+                # guess the model made that never counted for anything.
+                # Surfaced on the overlay/log (see main.py) so "the model
+                # drew a box" and "the model actually triggered a warning"
+                # aren't conflated when diagnosing false positives/negatives.
                 counted = False
 
                 name = label.lower()
@@ -205,14 +208,13 @@ class YoloDetector:
                     counted = passes("phone", conf)
                     if counted:
                         result["phone"] = True
-                elif "drink" in name or "bottle" in name or "cup" in name:
-                    if passes("drink", conf):
+                elif ("drink" in name or "bottle" in name or "cup" in name
+                        or "food" in name or "eating" in name):
+                    # Drinking and Eating merged - see the merge note by
+                    # COCO_CONSUMPTION_CLASSES in config.py.
+                    if passes("consumption", conf):
                         counted = near_mouth((x1, y1, x2, y2))
-                        result["drink"] = result["drink"] or counted
-                elif "food" in name or "eating" in name:
-                    if passes("food", conf):
-                        counted = near_mouth((x1, y1, x2, y2))
-                        result["food"] = result["food"] or counted
+                        result["consumption"] = result["consumption"] or counted
                 elif "cigarette" in name or "smoking" in name:
                     if passes("cigarette", conf):
                         counted = near_mouth((x1, y1, x2, y2))
@@ -243,12 +245,9 @@ class YoloDetector:
                 if label in config.COCO_PHONE_CLASSES:
                     counted = True
                     result["phone"] = True
-                elif label in config.COCO_DRINK_CLASSES:
+                elif label in config.COCO_CONSUMPTION_CLASSES:
                     counted = near_mouth((x1, y1, x2, y2))
-                    result["drink"] = result["drink"] or counted
-                elif label in config.COCO_FOOD_CLASSES:
-                    counted = near_mouth((x1, y1, x2, y2))
-                    result["food"] = result["food"] or counted
+                    result["consumption"] = result["consumption"] or counted
                 # cigarette / seatbelt stay None - not present in COCO
 
                 result["raw_boxes"].append((x1, y1, x2, y2, label, conf, counted))
@@ -257,6 +256,6 @@ class YoloDetector:
 
 
 _EMPTY_YOLO_STATE = {
-    "phone": False, "drink": False, "food": False,
+    "phone": False, "consumption": False,
     "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
 }

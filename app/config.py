@@ -153,13 +153,13 @@ YOLO_CONF_THRESHOLD = 0.20
 # Per-class confidence floor, applied in yolo_detector.py after the raw
 # (low-threshold) predict() call above. A single global threshold can't
 # serve every class well: phone needs to stay permissive (missed phones -
-# false negatives - were the bigger problem), while drink needs to be
-# stricter (weak/wrong "Drinking" guesses - false positives - were the
-# problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
+# false negatives - were the bigger problem), while consumption needs to
+# be stricter (weak/wrong "Drinking"/"Eating" guesses - false positives -
+# were the problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
 YOLO_CLASS_CONF_THRESHOLDS = {
-    "phone": 0.20,
-    "drink": 0.55,     # raised further - 0.55 still wasn't enough to stop false positives
-    "seatbelt": 0.20,  # already working well at this level - don't disturb
+    "phone": 0.35,
+    "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
+    "seatbelt": 0.35,     # already working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
@@ -188,15 +188,26 @@ YOLO_CONFIRM_MIN = 2
 # Radius, as a multiple of the mouth-corner distance, defining "near".
 # 3.5x worked out to roughly a quarter of the frame width in testing - far
 # wider than "near the mouth" should mean, and a second, independent source
-# of drink false positives alongside a too-low confidence threshold.
+# of drink false positives alongside a too-low confidence threshold. 1.5x
+# then turned out too tight the other way (a bottle genuinely being raised
+# to drink wasn't counting) - nudged up modestly, not back toward 3.5.
 MOUTH_PROXIMITY_RADIUS_MULT = 1.5
 
 # COCO class names (pretrained yolo11n.pt) that approximate our target behaviors
 # until the fine-tuned model (Phase 11) with real "phone/seatbelt/cigarette/food"
 # classes is available.
 COCO_PHONE_CLASSES = {"cell phone"}
-COCO_DRINK_CLASSES = {"bottle", "cup", "wine glass"}
-COCO_FOOD_CLASSES = {"banana", "apple", "sandwich", "orange", "pizza", "donut", "cake"}
+# Drinking and Eating merged into one "consumption" signal - a single-frame
+# object detector can't reliably tell the two apart (both are usually just
+# "some small object near a hand near the mouth"; the fine-tuned model's own
+# separate Drinking/Eating classes needed repeated confidence-threshold
+# tuning for exactly this reason). risk_engine.py already ORs them into one
+# consumption_active signal for scoring - this makes that unification
+# consistent all the way down instead of just at the risk-scoring layer.
+COCO_CONSUMPTION_CLASSES = {
+    "bottle", "cup", "wine glass",
+    "banana", "apple", "sandwich", "orange", "pizza", "donut", "cake",
+}
 # NOTE: "seatbelt" and "cigarette" do NOT exist in COCO's 80 classes.
 # These will read as None (unknown) until Phase 9-12 (your fine-tuned best.pt) is trained.
 

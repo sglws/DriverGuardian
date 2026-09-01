@@ -48,7 +48,7 @@ def setup_csv_logger():
     writer = csv.writer(f)
     writer.writerow(["timestamp", "risk", "case", "score", "eye_closed", "closed_elapsed",
                       "blink_rate", "mouth_open", "total_yawns", "pitch_delta", "yaw_delta",
-                      "phone", "drink", "food", "seatbelt_off", "messages"])
+                      "phone", "consumption", "seatbelt_off", "messages"])
     return f, writer, path
 
 
@@ -94,7 +94,7 @@ def main():
     last_csv_log = 0.0
     frame_count = 0
     cached_yolo_state = {
-        "phone": False, "drink": False, "food": False,
+        "phone": False, "consumption": False,
         "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
     }
 
@@ -271,8 +271,8 @@ def main():
                 f"Total: {drowsy_state['total_yawns']}"
                 f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
 
-                f"YOLO: phone={yolo_state['phone']} drink={yolo_state['drink']} "
-                f"food={yolo_state['food']} cigarette={yolo_state['cigarette']} "
+                f"YOLO: phone={yolo_state['phone']} consumption={yolo_state['consumption']} "
+                f"cigarette={yolo_state['cigarette']} "
                 f"SEATBELT: {utils.seatbelt_label(yolo_state['seatbelt_off'])} "
                 f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
 
@@ -325,8 +325,8 @@ def main():
                     drowsy_state["eye_closed"], f"{drowsy_state['closed_elapsed']:.2f}",
                     drowsy_state["blink_rate"], drowsy_state["mouth_open"], drowsy_state["total_yawns"],
                     f"{pose_state['pitch_delta']:.1f}",
-                    f"{pose_state['yaw_delta']:.1f}", yolo_state["phone"], yolo_state["drink"],
-                    yolo_state["food"], yolo_state["seatbelt_off"], " / ".join(messages),
+                    f"{pose_state['yaw_delta']:.1f}", yolo_state["phone"],
+                    yolo_state["consumption"], yolo_state["seatbelt_off"], " / ".join(messages),
                 ])
                 log_file.flush()
 
