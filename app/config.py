@@ -66,6 +66,19 @@ DISPLAY_ENABLED = True
 # processes GUI/keyboard events for the window, unrelated to whether a
 # new frame was actually pushed that iteration.
 DISPLAY_EVERY_N_FRAMES = 1
+# Scale factor applied to the preview frame just before cv2.imshow() -
+# 1.0 means no resize. Detection is completely unaffected: everything
+# (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
+# by this point, so this only shrinks what the GUI has to paint.
+#
+# Confirmed by per-frame timing on the Pi: imshow() itself is ~1ms, but
+# cv2.waitKey() runs 24ms on a normal frame and spikes past 100ms during
+# a visible stutter. That's because OpenCV's Qt backend only *queues* the
+# repaint in imshow() - the actual software blit happens inside the event
+# loop, i.e. inside waitKey(). This Qt build has no OpenGL support (see
+# cv2.getBuildInformation()), so that blit is a full CPU-side push of
+# every displayed pixel. Halving each dimension quarters that work.
+DISPLAY_SCALE = 0.5
 
 # --------------------------------------------------------------------------
 # Calibration

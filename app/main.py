@@ -360,7 +360,18 @@ def main():
             t_risk_draw = time.perf_counter()
             if config.DISPLAY_ENABLED:
                 if frame_count % config.DISPLAY_EVERY_N_FRAMES == 0:
-                    cv2.imshow("DriverGuardian", frame)
+                    # Preview-only downscale - see config.DISPLAY_SCALE.
+                    # Everything downstream of detection already ran on the
+                    # full-resolution frame, so this costs no accuracy; it
+                    # only shrinks what the (software, no-OpenGL) Qt
+                    # renderer has to blit inside waitKey() below.
+                    if config.DISPLAY_SCALE != 1.0:
+                        preview = cv2.resize(frame, None, fx=config.DISPLAY_SCALE,
+                                             fy=config.DISPLAY_SCALE,
+                                             interpolation=cv2.INTER_NEAREST)
+                    else:
+                        preview = frame
+                    cv2.imshow("DriverGuardian", preview)
                 # imshow() and waitKey() timed separately: the combined
                 # "display" stage was confirmed to spike to ~100ms roughly
                 # once a second (see [STUTTER]), but they fail for very
