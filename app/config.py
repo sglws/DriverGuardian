@@ -210,6 +210,19 @@ YOLO_CLASS_CONF_THRESHOLDS = {
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result otherwise
+# True runs YOLO on a background thread (YoloWorker); False calls it
+# inline on the main loop. Measured on the Pi, threading it was a net
+# LOSS despite doing exactly what it was designed to do:
+#   async ON:  yolo 0.1ms, but preprocess 31.6ms + display 25.7ms -> 11.7fps
+#   async OFF: yolo 15.7ms, but preprocess 8.5ms + display 6.2ms  -> 17.8fps
+# Moving work to a thread doesn't create free CPU, it just overlaps it -
+# and on a saturated 4-core Pi, NCNN inference running concurrently with
+# the main thread's cvtColor/blit work (both memory-bandwidth-bound) slows
+# both down by more than the 15.6ms it saved. It was originally added to
+# smooth a visible stutter that per-frame timing later proved is caused by
+# cv2.waitKey() (~106ms spikes), not by YOLO - so it never addressed the
+# real problem anyway.
+YOLO_ASYNC = False
 # Uncapped, NCNN/torch grab every CPU core for the duration of each
 # inference call. On the Pi that starves the desktop session itself -
 # window manager, compositor, mouse cursor - of CPU time each time YOLO

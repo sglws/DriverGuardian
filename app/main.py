@@ -94,7 +94,10 @@ def main():
     head_pose_tracker = HeadPoseTracker()
     yolo = YoloDetector()
     yolo_confirmer = DetectionConfirmer()
-    yolo_worker = YoloWorker(yolo, yolo_confirmer)
+    # See config.YOLO_ASYNC - threading YOLO measured as a net FPS loss on
+    # the Pi (contention cost more than the inline cost it removed), so
+    # this is opt-in rather than the default.
+    yolo_worker = YoloWorker(yolo, yolo_confirmer) if config.YOLO_ASYNC else None
     risk_engine = RiskEngine()
     alerts = AlertSystem()
 
@@ -117,6 +120,13 @@ def main():
     last_console_log = 0.0
     last_csv_log = 0.0
     frame_count = 0
+    # Only used when config.YOLO_ASYNC is False - holds the last inline
+    # detection result for the frames YOLO doesn't run on. (When async,
+    # YoloWorker owns this state internally instead.)
+    cached_yolo_state = {
+        "phone": False, "consumption": False,
+        "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
+    }
 
     # ---- Per-stage profiling (diagnostic: which stage actually owns the
     # frame budget). Accumulated and averaged over PROFILE_LOG_INTERVAL_SEC
@@ -243,8 +253,12 @@ def main():
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                yolo_worker.submit(frame, roi)
-            yolo_state = yolo_worker.get_latest()
+                if yolo_worker is not None:
+                    yolo_worker.submit(frame, roi)
+                else:
+                    cached_yolo_state = yolo_confirmer.update(
+                        yolo.detect(frame, mouth_roi=roi), now)
+            yolo_state = yolo_worker.get_latest() if yolo_worker is not None else cached_yolo_state
             t_yolo = time.perf_counter()
 
             # ---- Draw YOLO bounding boxes ----
@@ -486,7 +500,8 @@ def main():
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
-        yolo_worker.close()
+        if yolo_worker is not None:
+            yolo_worker.close()
         log_file.close()
         print(f"Session log saved: {log_path}")
 
