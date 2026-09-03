@@ -127,6 +127,8 @@ def main():
                      "display": 0.0}
     profile_frames = 0
     last_profile_log = 0.0
+    # Rolling baseline for the per-frame [STUTTER] outlier check below.
+    frame_time_history = deque(maxlen=config.STUTTER_WINDOW_FRAMES)
 
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
@@ -368,13 +370,44 @@ def main():
                 key = 0xFF
             t_display = time.perf_counter()
 
-            stage_totals["camera"] += t_camera - t_loop_start
-            stage_totals["preprocess"] += t_preprocess - t_camera
-            stage_totals["mediapipe"] += t_mediapipe - t_preprocess
-            stage_totals["presence_logic"] += t_presence_logic - t_mediapipe
-            stage_totals["yolo"] += t_yolo - t_presence_logic
-            stage_totals["risk_draw"] += t_risk_draw - t_yolo
-            stage_totals["display"] += t_display - t_risk_draw
+            frame_stages = {
+                "camera": t_camera - t_loop_start,
+                "preprocess": t_preprocess - t_camera,
+                "mediapipe": t_mediapipe - t_preprocess,
+                "presence_logic": t_presence_logic - t_mediapipe,
+                "yolo": t_yolo - t_presence_logic,
+                "risk_draw": t_risk_draw - t_yolo,
+                "display": t_display - t_risk_draw,
+            }
+            frame_total = sum(frame_stages.values())
+
+            # Per-frame outlier detector: [PROFILE] only reports 5-second
+            # averages, which can't show which single frame actually
+            # stalled or by how much - exactly the gap that made the
+            # earlier "flickering"/stutter report hard to pin down (YOLO's
+            # own average dropped to ~0ms after threading it, but the
+            # stutter itself was still reported as present). Compares each
+            # frame's total time against a rolling baseline of the last
+            # STUTTER_WINDOW_FRAMES frames (excluding itself) and flags
+            # anything that's a clear multiple of that baseline, with a
+            # per-stage breakdown for that exact frame - so instead of
+            # guessing candidates one at a time, this shows directly which
+            # stage caused the spike and how often it happens.
+            if len(frame_time_history) >= config.STUTTER_MIN_SAMPLES:
+                baseline = sum(frame_time_history) / len(frame_time_history)
+                if frame_total >= baseline * config.STUTTER_MULTIPLIER:
+                    stage_str = " ".join(f"{k}={v * 1000:.1f}ms" for k, v in frame_stages.items())
+                    print(f"[STUTTER] frame took {frame_total * 1000:.1f}ms vs "
+                          f"~{baseline * 1000:.1f}ms baseline | {stage_str}")
+            frame_time_history.append(frame_total)
+
+            stage_totals["camera"] += frame_stages["camera"]
+            stage_totals["preprocess"] += frame_stages["preprocess"]
+            stage_totals["mediapipe"] += frame_stages["mediapipe"]
+            stage_totals["presence_logic"] += frame_stages["presence_logic"]
+            stage_totals["yolo"] += frame_stages["yolo"]
+            stage_totals["risk_draw"] += frame_stages["risk_draw"]
+            stage_totals["display"] += frame_stages["display"]
             profile_frames += 1
 
             if now - last_profile_log >= config.PROFILE_LOG_INTERVAL_SEC and profile_frames > 0:

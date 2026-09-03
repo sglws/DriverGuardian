@@ -264,6 +264,16 @@ SCORE_HIGH_MIN = 4
 CONSOLE_LOG_INTERVAL_SEC = 0.5
 CSV_LOG_INTERVAL_SEC = 1.0
 PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
+# Per-frame outlier detection (see main.py's [STUTTER] line). [PROFILE]
+# averages over 5s, which hides which *individual* frame stalled - the gap
+# that made a reported visible stutter hard to pin down even after YOLO's
+# own average dropped to ~0ms. A frame taking STUTTER_MULTIPLIER x the
+# rolling average of the last STUTTER_WINDOW_FRAMES gets logged with its
+# own per-stage breakdown, so the culprit stage is visible directly
+# instead of inferred by testing one candidate at a time.
+STUTTER_WINDOW_FRAMES = 30
+STUTTER_MIN_SAMPLES = 10   # don't flag anything until the baseline is meaningful
+STUTTER_MULTIPLIER = 2.0   # flag frames at least this many times the rolling average
 
 # --------------------------------------------------------------------------
 # ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)
