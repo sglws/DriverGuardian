@@ -449,7 +449,16 @@ def main():
                 avg_fps = profile_frames / total if total > 0 else 0.0
                 breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
                                       for k, v in stage_totals.items())
-                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
+                # brightness/CLAHE state included because the `preprocess`
+                # stage's cost swings hugely on it: enhance_low_light()
+                # only runs below LOW_LIGHT_BRIGHTNESS_THRESHOLD, and that
+                # CLAHE pass alone accounted for a ~24ms/frame difference
+                # (8.5ms -> 32ms) between two otherwise identical runs -
+                # i.e. an apparent "FPS regression" that was really just
+                # the room being darker.
+                clahe_state = "CLAHE-ON" if brightness < config.LOW_LIGHT_BRIGHTNESS_THRESHOLD else "CLAHE-off"
+                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown} "
+                      f"| brightness={brightness:.0f} ({clahe_state})")
                 stage_totals = {k: 0.0 for k in stage_totals}
                 profile_frames = 0
 
