@@ -108,8 +108,8 @@ YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still 
 # glance down at the dashboard/phone mount/mirrors far more often than they
 # tilt back - confirmed too sensitive specifically on forward/down lean in
 # practice. Backward/up unchanged at the original value.
-HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 12.0  # forward lean (pitch_delta > this)
-HEAD_LEAN_PITCH_UP_DELTA_DEG = 8.0     # backward lean (pitch_delta < -this)
+HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 15.0  # forward lean (pitch_delta > this)
+HEAD_LEAN_PITCH_UP_DELTA_DEG = 11.0    # backward lean (pitch_delta < -this)
 
 # A quick mirror check (side/rearview) or a glance at the dash/AC controls is
 # normal, SAFE driving behavior, not distraction - it's usually a moderate
@@ -185,6 +185,7 @@ YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.35,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
     "seatbelt": 0.35,     # already working well at this level - don't disturb
+    "cigarette": 0.35,    # same as seatbelt - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
