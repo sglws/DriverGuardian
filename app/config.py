@@ -66,26 +66,6 @@ DISPLAY_ENABLED = True
 # processes GUI/keyboard events for the window, unrelated to whether a
 # new frame was actually pushed that iteration.
 DISPLAY_EVERY_N_FRAMES = 1
-# Scale factor applied to the preview frame just before cv2.imshow() -
-# 1.0 means no resize. Detection is completely unaffected: everything
-# (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
-# by this point, so this only shrinks what the GUI has to paint.
-#
-# Background: per-frame timing showed imshow() is ~1ms while cv2.waitKey()
-# runs ~24ms normally and spikes past 100ms during a visible stutter -
-# OpenCV's Qt backend only *queues* the repaint in imshow(), so the actual
-# software blit happens inside the event loop (i.e. inside waitKey()), and
-# this Qt build has no OpenGL support (cv2.getBuildInformation()).
-#
-# Measured results differ sharply by machine, so this stays 1.0 by default:
-#   - Windows laptop (cv2.VideoCapture/DSHOW): 0.5 cut waitKey 24.5ms ->
-#     2.2ms. Blit cost there really is proportional to pixel count.
-#   - Raspberry Pi (Wayland compositor): 0.5 changed nothing at all -
-#     waitKey stayed at 24.4ms with the same ~106ms spikes. So the Pi's
-#     waitKey cost is NOT pixel-count-bound; it looks more like blocking
-#     on compositor frame callbacks (a vsync-style wait), which no amount
-#     of shrinking the frame can avoid.
-DISPLAY_SCALE = 1.0
 
 # --------------------------------------------------------------------------
 # Calibration
@@ -205,24 +185,10 @@ YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.35,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
     "seatbelt": 0.35,     # already working well at this level - don't disturb
-    "cigarette": 0.35,    # same as seatbelt - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
 YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result otherwise
-# True runs YOLO on a background thread (YoloWorker); False calls it
-# inline on the main loop. Measured on the Pi, threading it was a net
-# LOSS despite doing exactly what it was designed to do:
-#   async ON:  yolo 0.1ms, but preprocess 31.6ms + display 25.7ms -> 11.7fps
-#   async OFF: yolo 15.7ms, but preprocess 8.5ms + display 6.2ms  -> 17.8fps
-# Moving work to a thread doesn't create free CPU, it just overlaps it -
-# and on a saturated 4-core Pi, NCNN inference running concurrently with
-# the main thread's cvtColor/blit work (both memory-bandwidth-bound) slows
-# both down by more than the 15.6ms it saved. It was originally added to
-# smooth a visible stutter that per-frame timing later proved is caused by
-# cv2.waitKey() (~106ms spikes), not by YOLO - so it never addressed the
-# real problem anyway.
-YOLO_ASYNC = False
 # Uncapped, NCNN/torch grab every CPU core for the duration of each
 # inference call. On the Pi that starves the desktop session itself -
 # window manager, compositor, mouse cursor - of CPU time each time YOLO
@@ -297,16 +263,6 @@ SCORE_HIGH_MIN = 4
 CONSOLE_LOG_INTERVAL_SEC = 0.5
 CSV_LOG_INTERVAL_SEC = 1.0
 PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
-# Per-frame outlier detection (see main.py's [STUTTER] line). [PROFILE]
-# averages over 5s, which hides which *individual* frame stalled - the gap
-# that made a reported visible stutter hard to pin down even after YOLO's
-# own average dropped to ~0ms. A frame taking STUTTER_MULTIPLIER x the
-# rolling average of the last STUTTER_WINDOW_FRAMES gets logged with its
-# own per-stage breakdown, so the culprit stage is visible directly
-# instead of inferred by testing one candidate at a time.
-STUTTER_WINDOW_FRAMES = 30
-STUTTER_MIN_SAMPLES = 10   # don't flag anything until the baseline is meaningful
-STUTTER_MULTIPLIER = 2.0   # flag frames at least this many times the rolling average
 
 # --------------------------------------------------------------------------
 # ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)

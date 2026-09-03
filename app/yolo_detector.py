@@ -17,8 +17,6 @@ at all (not in COCO's 80 classes), so those come back as None (meaning
 """
 
 import os
-import threading
-import time
 from collections import deque
 
 from app import config, utils
@@ -274,76 +272,3 @@ _EMPTY_YOLO_STATE = {
     "phone": False, "consumption": False,
     "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
 }
-
-
-class YoloWorker:
-    """Runs YoloDetector.detect() + DetectionConfirmer.update() on its own
-    background thread, so YOLO's per-call cost (much higher than its
-    *average* in [PROFILE] - it only runs every YOLO_INFER_EVERY_N_FRAMES
-    frames, so the average hides a real spike concentrated on that one
-    frame) doesn't land as a stall on the main video loop.
-
-    This is a different situation from Esp32Link/TTS's threading, which
-    caused a proven, severe freeze - confirmed via git bisect - from
-    spawning a subprocess (bluetoothctl) via fork() from a background
-    thread while Qt was loaded. Nothing in this class ever calls
-    subprocess.run() or forks a process; it's pure CPU inference, so it
-    doesn't hit that hazard. The other risk from this app's *first*
-    YOLO-threading attempt - NCNN's own internal thread pool competing
-    with the rest of the process for CPU cores - is now actually
-    addressed too (config.YOLO_INFERENCE_THREADS caps it, and main.py
-    reserves cores via CPU affinity), neither of which existed back then.
-
-    Same submit()/get_latest() pattern as Esp32Link.set_state(): the main
-    thread only ever hands off a frame and reads back a cached result,
-    both instant and thread-safe - it never waits on inference itself.
-    """
-
-    def __init__(self, yolo_detector: YoloDetector, confirmer: DetectionConfirmer):
-        self._yolo = yolo_detector
-        self._confirmer = confirmer
-        self._lock = threading.Lock()
-        self._pending = None  # (frame_copy, mouth_roi) or None
-        self._latest_state = dict(_EMPTY_YOLO_STATE)
-        self._stop = False
-        self._new_frame = threading.Event()
-        self._thread = threading.Thread(target=self._worker, daemon=True)
-        self._thread.start()
-
-    def submit(self, frame, mouth_roi):
-        """Called from the main video loop - instant, never blocks.
-        Copies the frame (the caller keeps drawing on/reusing its own
-        buffer right after this returns) and overwrites any not-yet-
-        started previous submission, since only the latest frame matters."""
-        with self._lock:
-            self._pending = (frame.copy(), mouth_roi)
-        self._new_frame.set()
-
-    def get_latest(self) -> dict:
-        """Called from the main video loop every frame - instant, returns
-        whatever the most recently completed inference produced (the same
-        cached-result pattern already used for the every-Nth-frame
-        cadence, just now also covering however long inference itself
-        takes)."""
-        with self._lock:
-            return self._latest_state
-
-    def close(self):
-        self._stop = True
-        self._new_frame.set()
-
-    def _worker(self):
-        while not self._stop:
-            self._new_frame.wait(timeout=1.0)
-            self._new_frame.clear()
-            if self._stop:
-                break
-            with self._lock:
-                pending, self._pending = self._pending, None
-            if pending is None:
-                continue
-            frame, mouth_roi = pending
-            raw_state = self._yolo.detect(frame, mouth_roi=mouth_roi)
-            confirmed = self._confirmer.update(raw_state, time.time())
-            with self._lock:
-                self._latest_state = confirmed

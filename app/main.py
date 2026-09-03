@@ -52,7 +52,7 @@ from app.eye_tracker import EyeTracker
 from app.mouth_tracker import MouthTracker
 from app.drowsiness import DrowsinessDetector, DrowsinessLevel
 from app.head_pose import estimate_pose, HeadPoseTracker
-from app.yolo_detector import YoloDetector, DetectionConfirmer, YoloWorker
+from app.yolo_detector import YoloDetector, DetectionConfirmer
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
 
@@ -94,10 +94,6 @@ def main():
     head_pose_tracker = HeadPoseTracker()
     yolo = YoloDetector()
     yolo_confirmer = DetectionConfirmer()
-    # See config.YOLO_ASYNC - threading YOLO measured as a net FPS loss on
-    # the Pi (contention cost more than the inline cost it removed), so
-    # this is opt-in rather than the default.
-    yolo_worker = YoloWorker(yolo, yolo_confirmer) if config.YOLO_ASYNC else None
     risk_engine = RiskEngine()
     alerts = AlertSystem()
 
@@ -120,9 +116,6 @@ def main():
     last_console_log = 0.0
     last_csv_log = 0.0
     frame_count = 0
-    # Only used when config.YOLO_ASYNC is False - holds the last inline
-    # detection result for the frames YOLO doesn't run on. (When async,
-    # YoloWorker owns this state internally instead.)
     cached_yolo_state = {
         "phone": False, "consumption": False,
         "cigarette": None, "seatbelt_off": None, "raw_boxes": [],
@@ -134,11 +127,9 @@ def main():
     # would skew the very thing being measured.
     stage_totals = {"camera": 0.0, "preprocess": 0.0, "mediapipe": 0.0,
                      "presence_logic": 0.0, "yolo": 0.0, "risk_draw": 0.0,
-                     "imshow": 0.0, "waitkey": 0.0}
+                     "display": 0.0}
     profile_frames = 0
     last_profile_log = 0.0
-    # Rolling baseline for the per-frame [STUTTER] outlier check below.
-    frame_time_history = deque(maxlen=config.STUTTER_WINDOW_FRAMES)
 
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
@@ -253,12 +244,9 @@ def main():
             frame_count += 1
             if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                if yolo_worker is not None:
-                    yolo_worker.submit(frame, roi)
-                else:
-                    cached_yolo_state = yolo_confirmer.update(
-                        yolo.detect(frame, mouth_roi=roi), now)
-            yolo_state = yolo_worker.get_latest() if yolo_worker is not None else cached_yolo_state
+                raw_yolo_state = yolo.detect(frame, mouth_roi=roi)
+                cached_yolo_state = yolo_confirmer.update(raw_yolo_state, now)
+            yolo_state = cached_yolo_state
             t_yolo = time.perf_counter()
 
             # ---- Draw YOLO bounding boxes ----
@@ -374,29 +362,7 @@ def main():
             t_risk_draw = time.perf_counter()
             if config.DISPLAY_ENABLED:
                 if frame_count % config.DISPLAY_EVERY_N_FRAMES == 0:
-                    # Preview-only downscale - see config.DISPLAY_SCALE.
-                    # Everything downstream of detection already ran on the
-                    # full-resolution frame, so this costs no accuracy; it
-                    # only shrinks what the (software, no-OpenGL) Qt
-                    # renderer has to blit inside waitKey() below.
-                    if config.DISPLAY_SCALE != 1.0:
-                        preview = cv2.resize(frame, None, fx=config.DISPLAY_SCALE,
-                                             fy=config.DISPLAY_SCALE,
-                                             interpolation=cv2.INTER_NEAREST)
-                    else:
-                        preview = frame
-                    cv2.imshow("DriverGuardian", preview)
-                # imshow() and waitKey() timed separately: the combined
-                # "display" stage was confirmed to spike to ~100ms roughly
-                # once a second (see [STUTTER]), but they fail for very
-                # different reasons - imshow() blocking points at frame
-                # data volume through this Qt build's software renderer (no
-                # OpenGL support), while waitKey() blocking points at the
-                # GUI event loop / compositor sync instead. Splitting them
-                # also explains why DISPLAY_EVERY_N_FRAMES=3 changed
-                # nothing earlier: that only gates imshow(), while
-                # waitKey() runs every frame regardless.
-                t_imshow = time.perf_counter()
+                    cv2.imshow("DriverGuardian", frame)
                 key = cv2.waitKey(1) & 0xFF
             else:
                 # No window, no keyboard input possible - quit via Ctrl+C
@@ -404,43 +370,15 @@ def main():
                 # the `finally` cleanup block below) and recalibration only
                 # happens once at startup, not re-triggerable mid-session.
                 key = 0xFF
-                t_imshow = time.perf_counter()
             t_display = time.perf_counter()
 
-            frame_stages = {
-                "camera": t_camera - t_loop_start,
-                "preprocess": t_preprocess - t_camera,
-                "mediapipe": t_mediapipe - t_preprocess,
-                "presence_logic": t_presence_logic - t_mediapipe,
-                "yolo": t_yolo - t_presence_logic,
-                "risk_draw": t_risk_draw - t_yolo,
-                "imshow": t_imshow - t_risk_draw,
-                "waitkey": t_display - t_imshow,
-            }
-            frame_total = sum(frame_stages.values())
-
-            # Per-frame outlier detector: [PROFILE] only reports 5-second
-            # averages, which can't show which single frame actually
-            # stalled or by how much - exactly the gap that made the
-            # earlier "flickering"/stutter report hard to pin down (YOLO's
-            # own average dropped to ~0ms after threading it, but the
-            # stutter itself was still reported as present). Compares each
-            # frame's total time against a rolling baseline of the last
-            # STUTTER_WINDOW_FRAMES frames (excluding itself) and flags
-            # anything that's a clear multiple of that baseline, with a
-            # per-stage breakdown for that exact frame - so instead of
-            # guessing candidates one at a time, this shows directly which
-            # stage caused the spike and how often it happens.
-            if len(frame_time_history) >= config.STUTTER_MIN_SAMPLES:
-                baseline = sum(frame_time_history) / len(frame_time_history)
-                if frame_total >= baseline * config.STUTTER_MULTIPLIER:
-                    stage_str = " ".join(f"{k}={v * 1000:.1f}ms" for k, v in frame_stages.items())
-                    print(f"[STUTTER] frame took {frame_total * 1000:.1f}ms vs "
-                          f"~{baseline * 1000:.1f}ms baseline | {stage_str}")
-            frame_time_history.append(frame_total)
-
-            for _stage, _elapsed in frame_stages.items():
-                stage_totals[_stage] += _elapsed
+            stage_totals["camera"] += t_camera - t_loop_start
+            stage_totals["preprocess"] += t_preprocess - t_camera
+            stage_totals["mediapipe"] += t_mediapipe - t_preprocess
+            stage_totals["presence_logic"] += t_presence_logic - t_mediapipe
+            stage_totals["yolo"] += t_yolo - t_presence_logic
+            stage_totals["risk_draw"] += t_risk_draw - t_yolo
+            stage_totals["display"] += t_display - t_risk_draw
             profile_frames += 1
 
             if now - last_profile_log >= config.PROFILE_LOG_INTERVAL_SEC and profile_frames > 0:
@@ -449,16 +387,7 @@ def main():
                 avg_fps = profile_frames / total if total > 0 else 0.0
                 breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
                                       for k, v in stage_totals.items())
-                # brightness/CLAHE state included because the `preprocess`
-                # stage's cost swings hugely on it: enhance_low_light()
-                # only runs below LOW_LIGHT_BRIGHTNESS_THRESHOLD, and that
-                # CLAHE pass alone accounted for a ~24ms/frame difference
-                # (8.5ms -> 32ms) between two otherwise identical runs -
-                # i.e. an apparent "FPS regression" that was really just
-                # the room being darker.
-                clahe_state = "CLAHE-ON" if brightness < config.LOW_LIGHT_BRIGHTNESS_THRESHOLD else "CLAHE-off"
-                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown} "
-                      f"| brightness={brightness:.0f} ({clahe_state})")
+                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
                 stage_totals = {k: 0.0 for k in stage_totals}
                 profile_frames = 0
 
@@ -509,8 +438,6 @@ def main():
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
-        if yolo_worker is not None:
-            yolo_worker.close()
         log_file.close()
         print(f"Session log saved: {log_path}")
 
