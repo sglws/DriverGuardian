@@ -71,14 +71,21 @@ DISPLAY_EVERY_N_FRAMES = 1
 # (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
 # by this point, so this only shrinks what the GUI has to paint.
 #
-# Confirmed by per-frame timing on the Pi: imshow() itself is ~1ms, but
-# cv2.waitKey() runs 24ms on a normal frame and spikes past 100ms during
-# a visible stutter. That's because OpenCV's Qt backend only *queues* the
-# repaint in imshow() - the actual software blit happens inside the event
-# loop, i.e. inside waitKey(). This Qt build has no OpenGL support (see
-# cv2.getBuildInformation()), so that blit is a full CPU-side push of
-# every displayed pixel. Halving each dimension quarters that work.
-DISPLAY_SCALE = 0.5
+# Background: per-frame timing showed imshow() is ~1ms while cv2.waitKey()
+# runs ~24ms normally and spikes past 100ms during a visible stutter -
+# OpenCV's Qt backend only *queues* the repaint in imshow(), so the actual
+# software blit happens inside the event loop (i.e. inside waitKey()), and
+# this Qt build has no OpenGL support (cv2.getBuildInformation()).
+#
+# Measured results differ sharply by machine, so this stays 1.0 by default:
+#   - Windows laptop (cv2.VideoCapture/DSHOW): 0.5 cut waitKey 24.5ms ->
+#     2.2ms. Blit cost there really is proportional to pixel count.
+#   - Raspberry Pi (Wayland compositor): 0.5 changed nothing at all -
+#     waitKey stayed at 24.4ms with the same ~106ms spikes. So the Pi's
+#     waitKey cost is NOT pixel-count-bound; it looks more like blocking
+#     on compositor frame callbacks (a vsync-style wait), which no amount
+#     of shrinking the frame can avoid.
+DISPLAY_SCALE = 1.0
 
 # --------------------------------------------------------------------------
 # Calibration
