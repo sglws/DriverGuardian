@@ -124,7 +124,7 @@ def main():
     # would skew the very thing being measured.
     stage_totals = {"camera": 0.0, "preprocess": 0.0, "mediapipe": 0.0,
                      "presence_logic": 0.0, "yolo": 0.0, "risk_draw": 0.0,
-                     "display": 0.0}
+                     "imshow": 0.0, "waitkey": 0.0}
     profile_frames = 0
     last_profile_log = 0.0
     # Rolling baseline for the per-frame [STUTTER] outlier check below.
@@ -361,6 +361,17 @@ def main():
             if config.DISPLAY_ENABLED:
                 if frame_count % config.DISPLAY_EVERY_N_FRAMES == 0:
                     cv2.imshow("DriverGuardian", frame)
+                # imshow() and waitKey() timed separately: the combined
+                # "display" stage was confirmed to spike to ~100ms roughly
+                # once a second (see [STUTTER]), but they fail for very
+                # different reasons - imshow() blocking points at frame
+                # data volume through this Qt build's software renderer (no
+                # OpenGL support), while waitKey() blocking points at the
+                # GUI event loop / compositor sync instead. Splitting them
+                # also explains why DISPLAY_EVERY_N_FRAMES=3 changed
+                # nothing earlier: that only gates imshow(), while
+                # waitKey() runs every frame regardless.
+                t_imshow = time.perf_counter()
                 key = cv2.waitKey(1) & 0xFF
             else:
                 # No window, no keyboard input possible - quit via Ctrl+C
@@ -368,6 +379,7 @@ def main():
                 # the `finally` cleanup block below) and recalibration only
                 # happens once at startup, not re-triggerable mid-session.
                 key = 0xFF
+                t_imshow = time.perf_counter()
             t_display = time.perf_counter()
 
             frame_stages = {
@@ -377,7 +389,8 @@ def main():
                 "presence_logic": t_presence_logic - t_mediapipe,
                 "yolo": t_yolo - t_presence_logic,
                 "risk_draw": t_risk_draw - t_yolo,
-                "display": t_display - t_risk_draw,
+                "imshow": t_imshow - t_risk_draw,
+                "waitkey": t_display - t_imshow,
             }
             frame_total = sum(frame_stages.values())
 
@@ -401,13 +414,8 @@ def main():
                           f"~{baseline * 1000:.1f}ms baseline | {stage_str}")
             frame_time_history.append(frame_total)
 
-            stage_totals["camera"] += frame_stages["camera"]
-            stage_totals["preprocess"] += frame_stages["preprocess"]
-            stage_totals["mediapipe"] += frame_stages["mediapipe"]
-            stage_totals["presence_logic"] += frame_stages["presence_logic"]
-            stage_totals["yolo"] += frame_stages["yolo"]
-            stage_totals["risk_draw"] += frame_stages["risk_draw"]
-            stage_totals["display"] += frame_stages["display"]
+            for _stage, _elapsed in frame_stages.items():
+                stage_totals[_stage] += _elapsed
             profile_frames += 1
 
             if now - last_profile_log >= config.PROFILE_LOG_INTERVAL_SEC and profile_frames > 0:
