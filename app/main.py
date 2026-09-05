@@ -127,8 +127,12 @@ def main():
                      "imshow": 0.0, "waitkey": 0.0}
     profile_frames = 0
     last_profile_log = 0.0
-    # Rolling baseline for the per-frame [STUTTER] outlier check below.
+    # Rolling baseline for the per-frame [STUTTER] outlier check below,
+    # plus per-window accumulators so outliers are summarised once per
+    # [PROFILE] rather than printed one line each.
     frame_time_history = deque(maxlen=config.STUTTER_WINDOW_FRAMES)
+    stutter_count = 0
+    stutter_worst = None  # (frame_total, baseline, stage_str) of the worst so far
 
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
@@ -417,12 +421,19 @@ def main():
             # per-stage breakdown for that exact frame - so instead of
             # guessing candidates one at a time, this shows directly which
             # stage caused the spike and how often it happens.
+            # Accumulated rather than printed per-occurrence: at one line
+            # per outlier this floods the console (and printing is itself
+            # slow enough to perturb the very timing being measured). One
+            # summary per [PROFILE] window is also strictly more useful -
+            # it gives the frequency, not just isolated events.
             if len(frame_time_history) >= config.STUTTER_MIN_SAMPLES:
                 baseline = sum(frame_time_history) / len(frame_time_history)
                 if frame_total >= baseline * config.STUTTER_MULTIPLIER:
-                    stage_str = " ".join(f"{k}={v * 1000:.1f}ms" for k, v in frame_stages.items())
-                    print(f"[STUTTER] frame took {frame_total * 1000:.1f}ms vs "
-                          f"~{baseline * 1000:.1f}ms baseline | {stage_str}")
+                    stutter_count += 1
+                    if stutter_worst is None or frame_total > stutter_worst[0]:
+                        stage_str = " ".join(f"{k}={v * 1000:.1f}ms"
+                                              for k, v in frame_stages.items())
+                        stutter_worst = (frame_total, baseline, stage_str)
             frame_time_history.append(frame_total)
 
             for _stage, _elapsed in frame_stages.items():
@@ -436,6 +447,14 @@ def main():
                 breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
                                       for k, v in stage_totals.items())
                 print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
+                if stutter_count:
+                    worst_total, worst_baseline, worst_stages = stutter_worst
+                    print(f"[STUTTER] {stutter_count} of {profile_frames} frames "
+                          f">{config.STUTTER_MULTIPLIER:g}x baseline | worst "
+                          f"{worst_total * 1000:.1f}ms vs ~{worst_baseline * 1000:.1f}ms "
+                          f"| {worst_stages}")
+                stutter_count = 0
+                stutter_worst = None
                 stage_totals = {k: 0.0 for k in stage_totals}
                 profile_frames = 0
 

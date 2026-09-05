@@ -209,7 +209,7 @@ YOLO_CLASS_CONF_THRESHOLDS = {
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
-YOLO_INFER_EVERY_N_FRAMES = 5     # run YOLO on 1-in-5 frames; reuse last result otherwise
+YOLO_INFER_EVERY_N_FRAMES = 6     # run YOLO on 1-in-5 frames; reuse last result otherwise
 # Uncapped, NCNN/torch grab every CPU core for the duration of each
 # inference call. On the Pi that starves the desktop session itself -
 # window manager, compositor, mouse cursor - of CPU time each time YOLO
