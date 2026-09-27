@@ -50,13 +50,14 @@ from app.face_detector import PresenceDetector
 from app.face_mesh import FaceMeshWrapper
 from app.eye_tracker import EyeTracker
 from app.mouth_tracker import MouthTracker
-from app.drowsiness import DrowsinessDetector, DrowsinessLevel
+from app.drowsiness import DrowsinessDetector
 from app.head_pose import estimate_pose, HeadPoseTracker
 from app.yolo_detector import YoloDetector, DetectionConfirmer, YoloWorker
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
 
 RISK_COLORS = {
+    Risk.WAITING: (200, 200, 200),
     Risk.SAFE: (0, 200, 0),
     Risk.LOW: (0, 255, 255),
     Risk.MEDIUM: (0, 165, 255),
@@ -209,6 +210,12 @@ def main():
                     cv2.putText(frame, "Waiting for face to calibrate...",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
+                # Keep the ESP32 fed during calibration too - it's the same
+                # "not monitoring yet" phase as the pre-drive check, and a
+                # silent Pi would trip the ESP32's link-loss watchdog into a
+                # full HIGH alarm (see Risk.WAITING).
+                alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
+
                 if config.DISPLAY_ENABLED:
                     cv2.imshow("DriverGuardian", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -240,8 +247,9 @@ def main():
                 presence = PresenceState.DRIVER_PRESENT
 
            # ---- Run detection pipelines ----
-            pose_state = head_pose_tracker.update(pitch, yaw, now)
-            drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"], smoothed_mar)
+            pose_state = head_pose_tracker.update(pitch, yaw, now, face_found=face_found)
+            drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"],
+                                             smoothed_mar, face_found=face_found)
             t_presence_logic = time.perf_counter()
 
             frame_count += 1
@@ -268,8 +276,12 @@ def main():
                     cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
 
+            # seatbelt_supported: the pre-drive gate can only demand a
+            # confirmed belt when the loaded model actually has that class -
+            # the COCO-pretrained fallback does not (see yolo_detector).
             risk, messages, debug = risk_engine.evaluate(
-                now, presence, drowsy_state, pose_state, yolo_state
+                now, presence, drowsy_state, pose_state, yolo_state,
+                seatbelt_supported=yolo.using_finetuned,
             )
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
@@ -473,18 +485,6 @@ def main():
                     else:
                         print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  no throttling")
 
-                # Same cadence, same reasoning: a process blocked swapping
-                # in from a slow SD card doesn't need a CPU core, so it's
-                # invisible to CPU-affinity/thread-cap fixes but produces
-                # the exact same "everything freezes, then catches up"
-                # symptom - rule it in/out directly instead of guessing.
-                mem = utils.check_memory_status()
-                if mem["available"]:
-                    swap_note = (f"SWAPPING {mem['swap_used_mb']:.0f}/{mem['swap_total_mb']:.0f}MB"
-                                 if mem["swap_used_mb"] > 1.0 else "no swap use")
-                    print(f"[MEMORY] used={mem['mem_used_pct']:.0f}% "
-                          f"available={mem['mem_available_mb']:.0f}MB  {swap_note}")
-
             if key == ord('q'):
                 break
             elif key == ord('r'):
@@ -499,6 +499,7 @@ def main():
                 drowsiness.reset()
                 presence_hysteresis.reset()
                 obstruction_hysteresis.reset()
+                risk_engine.reset_pre_drive()
 
     finally:
         camera.release()

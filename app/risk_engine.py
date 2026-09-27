@@ -22,6 +22,12 @@ from app.drowsiness import DrowsinessLevel
 
 
 class Risk(Enum):
+    # Not a risk tier: monitoring hasn't started yet (calibrating, or the
+    # pre-drive seatbelt check hasn't passed). Sent to the ESP32 like any
+    # other state so its link-loss watchdog stays fed, but nothing alerts on
+    # it - no voice (AlertSystem only speaks for LOW/MEDIUM/HIGH) and the
+    # ESP32 keeps every actuator off.
+    WAITING = -1
     SAFE = 0
     LOW = 1
     MEDIUM = 2
@@ -41,10 +47,21 @@ class RiskEngine:
         self.phone_prev_active = False
         self.consumption_prev_active = False
         self.seatbelt_missing_since = None
+        # Pre-drive gate (see config.PRE_DRIVE_CHECK_ENABLED). Latches True
+        # the first frame the startup condition holds, and stays there. When
+        # the check is disabled it starts satisfied, so the flag always means
+        # "the gate is not holding anything back".
+        self.pre_drive_passed = not config.PRE_DRIVE_CHECK_ENABLED
+
+    def reset_pre_drive(self):
+        """Re-arm the startup gate - called when the session restarts
+        (recalibrate), so the check is re-verified rather than inherited
+        from the previous session."""
+        self.pre_drive_passed = not config.PRE_DRIVE_CHECK_ENABLED
 
     def evaluate(self, now, presence: PresenceState,
                  drowsiness_state: dict, head_pose_state: dict,
-                 yolo_state: dict):
+                 yolo_state: dict, seatbelt_supported: bool = True):
         """
         Returns (Risk, list[str] action_messages, dict debug_info).
 
@@ -56,6 +73,34 @@ class RiskEngine:
         conditions are active at once, the most severe one wins - see
         _CASE_PRIORITY below.
         """
+        # ---- Pre-drive readiness gate (runs before everything else) ----
+        # One condition: the seatbelt is confirmed fastened. Driver presence
+        # is NOT re-checked here - calibration runs immediately before this
+        # and can't complete without a face, so the driver is already known
+        # to be seated by the time this code is reachable.
+        #
+        # Deliberately passive while pending: reported as WAITING, which
+        # triggers no voice and no actuators. It is still sent to the ESP32
+        # on the normal interval - going silent instead would trip the
+        # ESP32's 3 s link-loss watchdog and set off the full HIGH alarm
+        # (buzzer, vibration, hazards) while the driver is just buckling up.
+        # The system waits quietly, then starts monitoring the moment the
+        # belt is on.
+        if not self.pre_drive_passed:
+            # `is not False` on purpose, not `not ...`: seatbelt_off is a
+            # tri-state and None means the belt has never been confirmed
+            # visible, which is exactly the unverified state this gate exists
+            # to wait on - treating it as fine would let the check pass by
+            # simply never seeing a belt at all.
+            if seatbelt_supported and yolo_state.get("seatbelt_off") is not False:
+                return Risk.WAITING, ["Waiting for seatbelt - monitoring not started"], {"case": "PRE_DRIVE"}
+            self.pre_drive_passed = True
+            # Names only what was actually verified - claiming a fastened belt
+            # while the belt check was skipped would be worse than silence.
+            print("[pre-drive] monitoring active" + (
+                "" if seatbelt_supported else
+                " (SEATBELT CHECK SKIPPED - loaded model has no seatbelt class)"))
+
         # ---- Instant HIGH overrides ----
         if presence == PresenceState.CAMERA_BLOCKED:
             return Risk.HIGH, ["Camera obstruction detected", "Hazard lights", "Autonomous stop"], {"case": "BLOCKED"}

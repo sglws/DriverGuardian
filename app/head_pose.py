@@ -91,7 +91,38 @@ class HeadPoseTracker:
         return (sum(self._pitch_history) / len(self._pitch_history),
                 sum(self._yaw_history) / len(self._yaw_history))
 
-    def update(self, pitch: float, yaw: float, now: float):
+    def update(self, pitch: float, yaw: float, now: float, face_found: bool = True):
+        if not face_found:
+            # main.py passes sentinel pitch/yaw of 0.0 on frames with no
+            # face. Those aren't measurements: pitch_delta would become
+            # -baseline_pitch, so with a camera mounted at an angle (a dash
+            # mount easily exceeds HEAD_LEAN_PITCH_UP_DELTA_DEG) an occluded
+            # face reads as a sustained backward lean and escalates to a
+            # LEAN case. Feeding them through smooth() would also poison the
+            # rolling average for HEAD_POSE_SMOOTHING_FRAMES frames after
+            # the face comes back. Absence is the presence logic's job
+            # (main.py / risk_engine.py), so hold everything neutral here
+            # and let the lean debounce decay rather than inventing a pose.
+            self.leaning_since = None
+            self.lean_case_active = False
+            self.turned_since = None
+            self.recheck_at = None
+            return {
+                "pitch_delta": 0.0,
+                "yaw_delta": 0.0,
+                "pitch_label": "FORWARD",
+                "yaw_label": "CENTER",
+                "is_leaning": False,
+                "lean_confirmed": self._lean_confirm.update(False, now),
+                "lean_elapsed": 0.0,
+                "lean_case_active": False,
+                "lean_recheck_due": False,
+                "is_turned": False,
+                "yaw_zone": "CENTER",
+                "turn_elapsed": 0.0,
+                "turn_risk": "NONE",
+            }
+
         pitch, yaw = self.smooth(pitch, yaw)
         pitch_delta = pitch - self.baseline_pitch
         yaw_delta = yaw - self.baseline_yaw
@@ -120,7 +151,13 @@ class HeadPoseTracker:
             yaw_label = "CENTER"
 
         # ---- Sustained-lean tracking (Case 2: forward or backward) ----
-        is_leaning = pitch_label in ("DOWN", "UP/BACK")
+        # Ignored once turned past LEAN_IGNORE_WHEN_TURNED_DEG - see config
+        # for why head turns were being read as leans. A turned head is
+        # handled by the turn state machine below (Case 3) instead - same
+        # idea as EAR_SUPPRESS_PITCH_DOWN_DEG suppressing eye closure while
+        # looking down.
+        is_leaning = (pitch_label in ("DOWN", "UP/BACK")
+                      and abs_yaw <= config.LEAN_IGNORE_WHEN_TURNED_DEG)
         # Debounced version of is_leaning - a single noisy frame (e.g. a
         # solvePnP pitch/yaw coupling glitch while simply turning the head)
         # can't inject a score contribution on its own; see risk_engine.py.

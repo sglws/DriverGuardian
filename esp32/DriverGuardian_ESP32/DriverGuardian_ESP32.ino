@@ -12,10 +12,17 @@
  *
  * PROTOCOL
  *   Each line from the Pi: "<RISK>,<CASE>\n"
- *     RISK in {SAFE, LOW, MEDIUM, HIGH}
+ *     RISK in {WAITING, SAFE, LOW, MEDIUM, HIGH}
  *     CASE examples: NONE, SLEEP, LEAN, LEAN_PROLONGED, TURN,
  *                     TURN_PROLONGED, SEATBELT, PHONE, PHONE_REPEAT,
- *                     CONSUMPTION, CONSUMPTION_REPEAT, YAWN, ABSENT, BLOCKED
+ *                     CONSUMPTION, CONSUMPTION_REPEAT, YAWN, ABSENT, BLOCKED,
+ *                     CALIBRATING, PRE_DRIVE (the last two only with WAITING)
+ *   WAITING = monitoring hasn't started yet (Pi calibrating, or the
+ *   pre-drive seatbelt check hasn't passed). Every alert output stays off;
+ *   only the green LED blinks slowly so "waiting" is visibly different from
+ *   SAFE (solid green). It still counts as a valid message for the
+ *   heartbeat below - that's the whole point of sending it, rather than
+ *   the Pi going quiet and tripping the link-loss alarm.
  *   Physical actuators are driven by RISK (matches the project's action
  *   table exactly: SAFE=continue, LOW=audio only, MEDIUM=vibration+amber,
  *   HIGH=buzzer+vibration+hazard+"taking control"). CASE is printed to the
@@ -52,7 +59,7 @@ const unsigned long BLINK_FAST_MS  = 150;   // HIGH-risk blink rate
 const unsigned long BLINK_SLOW_MS  = 600;   // LOW-risk blink rate
 const unsigned long MEDIUM_BEEP_MS = 400;   // MEDIUM intermittent-beep half-period
 
-String lastRisk = "SAFE";
+String lastRisk = "WAITING";  // nothing received from the Pi yet
 String lastCase = "NONE";
 unsigned long lastMessageAt = 0;
 bool linkFailed = false;
@@ -79,7 +86,20 @@ void applyState(const String &risk, const String &reasonCase) {
   // noTone(), never left implicit) - a state that doesn't explicitly
   // silence it would leave it stuck on from whatever the previous,
   // louder tier last set, e.g. de-escalating MEDIUM -> SAFE.
-  if (risk == "SAFE") {
+  if (risk == "WAITING") {
+    // Monitoring not started - no alerts at all, just a slow green blink.
+    if (now - lastBlinkToggle >= BLINK_SLOW_MS) {
+      blinkState = !blinkState;
+      lastBlinkToggle = now;
+    }
+    digitalWrite(GREEN_LED_PIN, blinkState ? HIGH : LOW);
+    digitalWrite(AMBER_LED_PIN, LOW);
+    digitalWrite(RED_LED_PIN, LOW);
+    digitalWrite(HAZARD_RELAY_PIN, LOW);
+    digitalWrite(VIBRATION_PIN, LOW);
+    noTone(BUZZER_PIN);
+
+  } else if (risk == "SAFE") {
     digitalWrite(GREEN_LED_PIN, HIGH);
     digitalWrite(AMBER_LED_PIN, LOW);
     digitalWrite(RED_LED_PIN, LOW);
@@ -157,7 +177,7 @@ void loop() {
         String reasonCase = buf.substring(comma + 1);
         risk.trim();
         reasonCase.trim();
-        if (risk == "SAFE" || risk == "LOW" || risk == "MEDIUM" || risk == "HIGH") {
+        if (risk == "WAITING" || risk == "SAFE" || risk == "LOW" || risk == "MEDIUM" || risk == "HIGH") {
           if (risk != lastRisk || reasonCase != lastCase) {
             Serial.printf("State: %s (case=%s)\n", risk.c_str(), reasonCase.c_str());
           }

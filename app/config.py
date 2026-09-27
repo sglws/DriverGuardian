@@ -13,7 +13,6 @@ import os
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
-OUTPUTS_DIR = os.path.join(BASE_DIR, "outputs")
 
 YOLO_PRETRAINED_PATH = os.path.join(MODELS_DIR, "yolo11n.pt")   # Phase 8 (COCO pretrained)
 YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (your custom classes)
@@ -39,7 +38,6 @@ FACE_DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "blaze_face_short_range.tfli
 CAMERA_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
-TARGET_FPS_MIN = 20     # non-functional requirement floor
 TARGET_FPS_PREFERRED = 30
 
 # When False: skips all drawing (face mesh dots, YOLO boxes, text panel)
@@ -126,10 +124,23 @@ YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still 
 # tilting down than up (same underlying landmark foreshortening that makes
 # EAR unreliable past EAR_SUPPRESS_PITCH_DOWN_DEG), and drivers legitimately
 # glance down at the dashboard/phone mount/mirrors far more often than they
-# tilt back - confirmed too sensitive specifically on forward/down lean in
-# practice. Backward/up unchanged at the original value.
-HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 15.0  # forward lean (pitch_delta > this)
+# tilt back, so down stays the less twitchy of the two. It was pushed to 15
+# while down-lean was firing on its own, but most of that turned out to be
+# phantom pitch from head turns, which LEAN_IGNORE_WHEN_TURNED_DEG below now
+# suppresses at the source - 15 was then high enough that real forward leans
+# stopped registering at all, so it comes back down to just above the up
+# value rather than compensating twice for the same noise.
+HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 12.0  # forward lean (pitch_delta > this)
 HEAD_LEAN_PITCH_UP_DELTA_DEG = 11.0    # backward lean (pitch_delta < -this)
+# Lean is ignored once the head is turned more than this far from straight
+# ahead. Pitch comes from a 6-landmark solvePnP fit, and on a real turn the
+# far-side eye/mouth corners go partly out of view and drift, skewing pitch
+# (measured: ~8 deg of false pitch at a 40 deg turn) - on top of the genuine
+# downward tilt that checking a door mirror or blind spot involves. Together
+# those pushed ordinary head turns past the lean threshold. Past this angle
+# the turn logic (YAW_TURN_* below) owns the behaviour instead, so it's
+# tracked as a turn rather than double-counted as a lean.
+LEAN_IGNORE_WHEN_TURNED_DEG = 20.0
 
 # A quick mirror check (side/rearview) or a glance at the dash/AC controls is
 # normal, SAFE driving behavior, not distraction - it's usually a moderate
@@ -172,6 +183,35 @@ LEAN_SCORE_CONFIRM_SEC = 0.5
 EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
 
 # --------------------------------------------------------------------------
+# Pre-drive readiness check (startup gate)
+# --------------------------------------------------------------------------
+# One condition gates the start of monitoring: the seatbelt is confirmed
+# fastened. Driver presence isn't part of it - calibration runs immediately
+# before and cannot finish without a face, so the driver is already known to
+# be seated.
+#
+# While the belt is still off the system stays deliberately quiet: it reports
+# the WAITING state, which triggers no voice and no ESP32 actuators. WAITING
+# is still sent on the normal ESP32 interval rather than going silent - the
+# ESP32 treats 3 s of silence as a lost link and raises the full HIGH alarm.
+# Getting in and buckling up is normal behaviour, not a fault to alarm about.
+# The moment the belt is confirmed, normal monitoring begins.
+#
+# "Confirmed" means seen, not merely un-contradicted: seatbelt_off is a
+# tri-state and sits at None until the belt has actually been detected once
+# (see yolo_detector._update_seatbelt), so an unverified belt can't pass the
+# gate by default. The check only applies while the fine-tuned model is
+# loaded - the COCO-pretrained fallback has no seatbelt class at all, so
+# enforcing it there would leave the app permanently waiting with nothing the
+# driver could do about it.
+#
+# Latched once passed: from that point the normal driving rules
+# (SEATBELT_UNWORN_ESCALATE_SEC, presence handling, etc.) own the behaviour,
+# so unbuckling later is a seatbelt violation rather than a failed startup.
+# Pressing 'r' to recalibrate re-arms it, since that restarts the session.
+PRE_DRIVE_CHECK_ENABLED = True
+
+# --------------------------------------------------------------------------
 # Presence / camera obstruction (Phase 2 + risk engine)
 # --------------------------------------------------------------------------
 NO_FACE_GRACE_SEC = 5.0            # no face detected for this long -> escalate (confirm-in)
@@ -202,9 +242,9 @@ YOLO_CONF_THRESHOLD = 0.20
 # be stricter (weak/wrong "Drinking"/"Eating" guesses - false positives -
 # were the problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
 YOLO_CLASS_CONF_THRESHOLDS = {
-    "phone": 0.35,
+    "phone": 0.25,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.35,     # already working well at this level - don't disturb
+    "seatbelt": 0.23,     # already working well at this level - don't disturb
     "cigarette": 0.35,    # same as seatbelt - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
@@ -315,7 +355,7 @@ ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
 # the Pi where the ESP32 is actually present, but pure waste on a machine
 # that will never have one nearby. False skips Esp32Link entirely -
 # dispatch() logs what it would have sent instead of touching the socket.
-ESP32_LINK_ENABLED = False
+ESP32_LINK_ENABLED = True
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
 # HIGH risk re-speaks its warning continuously (not just on change, unlike

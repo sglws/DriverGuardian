@@ -51,8 +51,19 @@ class DrowsinessDetector:
         return self.baseline_mar * config.MAR_YAWN_RATIO
 
     def update(self, smoothed_ear: float, now: float, pitch_delta: float = 0.0,
-               smoothed_mar: float = 0.0):
+               smoothed_mar: float = 0.0, face_found: bool = True):
         """Call once per frame. Returns a dict with the current eye/drowsiness state.
+
+        `face_found` must be False on frames where no face was detected.
+        main.py passes sentinel placeholder values for EAR/MAR on those
+        frames, and those placeholders are NOT valid measurements: the MAR
+        sentinel in particular sits above a typical yawn threshold
+        (baseline_mar * MAR_YAWN_RATIO, where a calibrated closed mouth is
+        usually well under 0.2), so feeding it in made covering the camera
+        or the face register as a sustained yawn instead of an absent
+        driver. Absence/obstruction is handled by the presence logic in
+        main.py and risk_engine.py - not here - so this just declines to
+        measure, rather than inventing a reading.
 
         `pitch_delta` is the calibrated head-pitch offset (positive = looking
         down). Beyond EAR_SUPPRESS_PITCH_DOWN_DEG the eyelid landmarks
@@ -71,10 +82,14 @@ class DrowsinessDetector:
         in risk_engine.py rather than being folded into DROWSY/MEDIUM.
         """
         looking_down = pitch_delta >= config.EAR_SUPPRESS_PITCH_DOWN_DEG
-        eye_closed = smoothed_ear < self.closed_threshold and not looking_down
+        eye_closed = face_found and smoothed_ear < self.closed_threshold and not looking_down
 
         # ---- Blink detection (Phase 5): count a blink on the closed->open edge ----
-        if self.prev_eye_closed and not eye_closed:
+        # Gated on face_found: losing the face mid-blink is not the eye
+        # re-opening, so it must not be credited as a completed blink -
+        # otherwise every occlusion inflates the blink rate, which feeds
+        # BLINK_RATE_DROWSY_THRESHOLD and can escalate to DROWSY.
+        if self.prev_eye_closed and not eye_closed and face_found:
             self.blink_timestamps.append(now)
             self.total_blinks += 1
         self.prev_eye_closed = eye_closed
@@ -92,13 +107,15 @@ class DrowsinessDetector:
             closed_elapsed = 0.0
 
         # ---- Yawn detection: mouth-open duration tracking, mirrors eye closure ----
-        mouth_open = smoothed_mar > self.open_mouth_threshold
+        mouth_open = face_found and smoothed_mar > self.open_mouth_threshold
         if mouth_open:
             if self.mouth_open_since is None:
                 self.mouth_open_since = now
             open_elapsed = now - self.mouth_open_since
         else:
-            if (self.prev_mouth_open and self.mouth_open_since is not None
+            # Same gating as the blink edge above: the face disappearing is
+            # not a mouth closing, so it must not complete a yawn.
+            if (face_found and self.prev_mouth_open and self.mouth_open_since is not None
                     and now - self.mouth_open_since >= config.YAWN_MIN_DURATION_SEC):
                 self.yawn_timestamps.append(now)
                 self.total_yawns += 1

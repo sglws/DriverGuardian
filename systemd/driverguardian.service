@@ -19,4 +19,13 @@ RestartSec=5
 # instead of leaving driver monitoring silently dead until next reboot.
 
 [Install]
-WantedBy=graphical-session.target
+# default.target, NOT graphical-session.target: the latter is activated by
+# the desktop session manager itself and is not a valid install target for
+# user units - `systemctl --user enable` appears to succeed against it but
+# creates no working hook, leaving the service permanently "disabled" and
+# silently never starting at boot (confirmed: is-enabled reported
+# "disabled" after enabling). default.target is the standard install
+# target for user services. graphical-session.target is still referenced
+# in [Unit] above, where After=/Wants= are legitimate - that's ordering,
+# not installation.
+WantedBy=default.target
