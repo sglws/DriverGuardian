@@ -1,5 +1,8 @@
 opencv-python
-mediapipe>=0.10.14
+# mediapipe 1.0.1's macOS wheel aborts on startup ("graph_service.h Check
+# failed: service_ Service is unavailable") even on the CPU delegate.
+mediapipe>=0.10.14,<1.0 ; sys_platform == "darwin"
+mediapipe>=0.10.14 ; sys_platform != "darwin"
 numpy
 ultralytics
 pyttsx3

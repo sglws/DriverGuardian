@@ -67,8 +67,14 @@ class Camera:
             # frame here, ~45-50% of the entire frame budget - by far the
             # single biggest cost, well above MediaPipe or YOLO). DSHOW is
             # consistently faster for USB webcams on Windows; V4L2 is the
-            # equivalent explicit choice on Linux/the Pi.
-            backend = cv2.CAP_DSHOW if sys.platform == "win32" else cv2.CAP_V4L2
+            # equivalent explicit choice on Linux/the Pi. V4L2 doesn't exist
+            # on macOS, where AVFoundation is the native camera backend.
+            if sys.platform == "win32":
+                backend = cv2.CAP_DSHOW
+            elif sys.platform == "darwin":
+                backend = cv2.CAP_AVFOUNDATION
+            else:
+                backend = cv2.CAP_V4L2
             self.cap = cv2.VideoCapture(index, backend)
             if not self.cap.isOpened():
                 raise RuntimeError(
@@ -89,7 +95,7 @@ class Camera:
             # frame instead of the newest one, adding latency independent
             # of the format fix above - keep only the latest frame.
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            print(f"[camera] Using cv2.VideoCapture ({'DSHOW' if backend == cv2.CAP_DSHOW else 'V4L2'}) "
+            print(f"[camera] Using cv2.VideoCapture ({self.cap.getBackendName()}) "
                   f"at index {index}")
             # cap.set() returns a bool but doesn't guarantee the driver
             # actually applied it - some backends/cameras silently ignore
