@@ -109,6 +109,16 @@ def main():
     log_file, csv_writer, log_path = setup_csv_logger()
     print(f"Logging session to: {log_path}")
 
+    # Optional per-classification timestamp log (requirement evidence; see
+    # config.RISK_UPDATE_LOG and tools/check_update_rate.py).
+    risk_log_file = risk_log_writer = None
+    if config.RISK_UPDATE_LOG:
+        risk_log_path = log_path.replace("session_", "risk_updates_")
+        risk_log_file = open(risk_log_path, "w", newline="")
+        risk_log_writer = csv.writer(risk_log_file)
+        risk_log_writer.writerow(["t_monotonic", "risk", "case"])
+        print(f"Logging every risk classification to: {risk_log_path}")
+
     # ---- Calibration state ----
     calibrating = True
     calibration_start = None
@@ -134,6 +144,19 @@ def main():
     frame_time_history = deque(maxlen=config.STUTTER_WINDOW_FRAMES)
     stutter_count = 0
     stutter_worst = None  # (frame_total, baseline, stage_str) of the worst so far
+
+    # ---- Risk classification update rate (requirement: >= 0.2 Hz, i.e. a
+    # new Low/Medium/High classification at least every 5 s). Measured on
+    # time.monotonic() - the Pi's wall clock can jump when NTP syncs, which
+    # would fake a huge gap (or a negative one). WAITING (pre-drive /
+    # calibration) is not a risk classification, so the gap clock is reset
+    # there and only starts once real monitoring is running.
+    risk_max_gap = 1.0 / config.RISK_UPDATE_MIN_HZ
+    risk_updates = 0
+    risk_last_t = None
+    risk_window_start = time.monotonic()
+    risk_gap_window_max = 0.0
+    risk_gap_session_max = 0.0
 
     print("Calibration will start once a face is detected.")
     print("Sit normally, look straight at the camera, eyes open.")
@@ -215,6 +238,8 @@ def main():
                 # silent Pi would trip the ESP32's link-loss watchdog into a
                 # full HIGH alarm (see Risk.WAITING).
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
+                risk_last_t = None  # not classifying yet - see risk-rate block
+
 
                 if config.DISPLAY_ENABLED:
                     cv2.imshow("DriverGuardian", frame)
@@ -284,6 +309,20 @@ def main():
                 seatbelt_supported=yolo.using_finetuned,
             )
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
+
+            if risk == Risk.WAITING:
+                risk_last_t = None
+            else:
+                t_class = time.monotonic()
+                if risk_last_t is not None:
+                    gap = t_class - risk_last_t
+                    risk_gap_window_max = max(risk_gap_window_max, gap)
+                    risk_gap_session_max = max(risk_gap_session_max, gap)
+                risk_last_t = t_class
+                risk_updates += 1
+                if risk_log_writer is not None:
+                    risk_log_writer.writerow([f"{t_class:.6f}", risk.name,
+                                              debug.get("case", "NONE")])
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
@@ -467,6 +506,21 @@ def main():
                           f"| {worst_stages}")
                 stutter_count = 0
                 stutter_worst = None
+
+                t_window = time.monotonic()
+                if risk_updates:
+                    rate = risk_updates / (t_window - risk_window_start)
+                    verdict = "PASS" if risk_gap_session_max <= risk_max_gap else "FAIL"
+                    print(f"[RISK-RATE] {rate:.1f} Hz over {risk_updates} classifications "
+                          f"| longest gap {risk_gap_window_max * 1000:.0f}ms "
+                          f"| session longest {risk_gap_session_max * 1000:.0f}ms "
+                          f"| req >= {config.RISK_UPDATE_MIN_HZ:g} Hz "
+                          f"(gap <= {risk_max_gap * 1000:.0f}ms): {verdict}")
+                else:
+                    print("[RISK-RATE] no classifications this window (waiting/calibrating)")
+                risk_updates = 0
+                risk_gap_window_max = 0.0
+                risk_window_start = t_window
                 stage_totals = {k: 0.0 for k in stage_totals}
                 profile_frames = 0
 
@@ -502,12 +556,15 @@ def main():
                 risk_engine.reset_pre_drive()
 
     finally:
+        alerts.close()  # stop any alert still being spoken
         camera.release()
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
         yolo_worker.close()
         log_file.close()
+        if risk_log_file is not None:
+            risk_log_file.close()
         print(f"Session log saved: {log_path}")
 
 

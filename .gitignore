@@ -49,3 +49,6 @@ models/*.pt
 
 # ESP32 firmware sketches - kept out of git
 esp32/
+
+# Project documents (requirements, reports, plots) - kept out of git
+documents/

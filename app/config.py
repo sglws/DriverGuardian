@@ -331,6 +331,17 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 CONSOLE_LOG_INTERVAL_SEC = 0.5
 CSV_LOG_INTERVAL_SEC = 1.0
+# Requirement check: "classification update rate of at least 0.2 Hz" means
+# no gap between two consecutive risk classifications may exceed 5 s.
+# main.py prints a [RISK-RATE] line on the [PROFILE] cadence with the rate
+# and the LONGEST gap (the worst case is what the requirement is about - an
+# average of 15 Hz still fails if one frame stalls for 6 s).
+RISK_UPDATE_MIN_HZ = 0.2
+# When True, every single classification's monotonic timestamp is written
+# to logs/risk_updates_<session>.csv for offline verification with
+# tools/check_update_rate.py. Off by default: one row per frame is ~15
+# rows/s, harmless but unnecessary outside a test run.
+RISK_UPDATE_LOG = False
 PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
 # Per-frame outlier detection (see main.py's [STUTTER] line). [PROFILE]
 # averages over 5s, which hides which *individual* frame stalled - the gap
@@ -367,19 +378,14 @@ ESP32_LINK_ENABLED = True
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
 # HIGH risk re-speaks its warning continuously (not just on change, unlike
-# LOW/MEDIUM) as a deliberate sustained audible alarm. _speak() now runs
-# on its own thread rather than blocking the video loop, but firing a new
-# one every single frame would still be wasteful (and pyttsx3 isn't meant
-# to be driven by overlapping calls) - rate-limited to this cadence
-# instead, still a repeating alarm, just not one fired every frame.
+# LOW/MEDIUM) as a deliberate sustained audible alarm, rate-limited to
+# this cadence (see alerts.Voice - speech is non-blocking, and a repeat is
+# skipped while the previous one is still playing).
 HIGH_RISK_VOICE_REPEAT_SEC = 3.0
-# Temporary kill switch for isolating TTS's CPU cost from FPS measurements
-# - even non-blocking, the speech thread still does real audio synthesis
-# work concurrently with the main thread while an utterance plays, which
-# can still cost FPS through CPU contention rather than a hard block.
-# Flip back to True once done profiling; [VOICE] text still prints either
-# way so alerts stay visible in the console/log.
-VOICE_ALERTS_ENABLED = False
+# Spoken alerts via espeak-ng (Pi) / say (macOS), run as a separate
+# process so the video loop never waits on speech. False = print only
+# ([VOICE] lines still appear either way).
+VOICE_ALERTS_ENABLED = True
 ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # don't hammer a failed connection attempt every frame
 ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing down + reconnecting
                                      # (a single slow send is often just a transient hiccup, not a

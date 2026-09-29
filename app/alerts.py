@@ -23,6 +23,10 @@ connecting to the same ESP32, since classic Bluetooth SPP only accepts
 one client at a time and the two would fight over that single slot.
 """
 
+import errno
+import os
+import select
+import shutil
 import socket
 import subprocess
 import sys
@@ -43,156 +47,240 @@ if not _BLUETOOTH_SOCKETS_AVAILABLE:
           "the ESP32 link is disabled. (Expected on Windows; on Linux, this usually "
           "means bluez/python3-dev support wasn't compiled in.)")
 
-try:
-    import pyttsx3
-    _tts_engine = pyttsx3.init()
-    _TTS_AVAILABLE = True
-except Exception:
-    _TTS_AVAILABLE = False
-
 from app import config
 
 
-def _speak(text: str):
-    """Blocking TTS call - deliberately NOT threaded.
+class Voice:
+    """Spoken alerts that never block the video loop.
 
-    Confirmed via git bisect on real hardware: threading this (and
-    Esp32Link below) is the exact, proven root cause of an intermittent
-    whole-system display freeze, not a performance nicety with no
-    downside. The mechanism: Esp32Link's reconnect path calls
-    subprocess.run() (bluetoothctl) from a background thread - spawning a
-    subprocess via fork() from a thread other than the main one, in a
-    process that also has a GUI toolkit (Qt, via cv2.imshow()) loaded, is
-    a classic Linux hazard. If Qt holds an internal lock at the instant of
-    fork(), only the forking thread survives into the child process - that
-    lock never gets released on the parent's side by whichever thread
-    actually held it, and Qt's own state corrupts. This lined up with
-    every piece of evidence gathered: the freeze vanished with the display
-    off (Qt is lazily initialized on first cv2.imshow(), so with it never
-    called, there's no Qt lock state to corrupt), was unaffected by
-    Wayland-vs-XWayland or display refresh rate (neither touches this
-    mechanism), and CPU/RAM were both independently ruled out. Threading
-    this again - even AFTER reasoning it "should" be safe as pure I/O -
-    reintroduced the exact same freeze; that reasoning missed the fork()
-    hazard entirely. Kept the rate-limiting/kill-switch pieces from that
-    attempt since those are genuinely independent, correct ideas - only
-    the threading itself was the bug.
+    Speaks by launching the OS speech program (espeak-ng/espeak on the Pi,
+    `say` on macOS) with subprocess.Popen and NOT waiting for it - each
+    call returns in about a millisecond while the audio plays in its own
+    process. The previous pyttsx3 runAndWait() froze frame processing for
+    the full length of every sentence (1-3 s), and at HIGH risk - which
+    re-speaks every HIGH_RISK_VOICE_REPEAT_SEC - that stalled monitoring
+    for a large share of exactly the time it matters most, and would break
+    the <= 1 s classification-gap requirement on its own.
+
+    Deliberately NOT a thread, and the spawn happens on the main thread:
+    fork() from a background thread while Qt is loaded (cv2.imshow()) is
+    the proven root cause of this project's whole-system freeze (git
+    bisect) - see Esp32Link below for the same rule.
+
+    One utterance at a time: a new alert interrupts the one still playing
+    (the newest risk is the relevant one); a HIGH repeat is skipped while
+    the previous repeat is still being spoken rather than piling up.
     """
-    if not config.VOICE_ALERTS_ENABLED:
-        print(f"[VOICE] (disabled) {text}")
-        return
-    if _TTS_AVAILABLE:
-        try:
-            _tts_engine.say(text)
-            _tts_engine.runAndWait()
+
+    def __init__(self):
+        self._cmd = None
+        for name, args in (("espeak-ng", ["-s", "165"]), ("espeak", ["-s", "165"]), ("say", [])):
+            path = shutil.which(name)
+            if path:
+                self._cmd = [path, *args]
+                break
+        self._proc = None
+        if config.VOICE_ALERTS_ENABLED and self._cmd is None:
+            print("[VOICE] No speech program found - alerts will only be printed. "
+                  "On the Pi: sudo apt install espeak-ng")
+
+    def busy(self) -> bool:
+        # poll() also reaps a finished process, so no zombies accumulate.
+        return self._proc is not None and self._proc.poll() is None
+
+    def say(self, text: str, interrupt: bool = True):
+        if not config.VOICE_ALERTS_ENABLED:
+            print(f"[VOICE] (disabled) {text}")
             return
-        except Exception:
-            pass
-    print(f"[VOICE] {text}")
+        print(f"[VOICE] {text}")
+        if self._cmd is None:
+            return
+        if self.busy():
+            if not interrupt:
+                return
+            self._proc.kill()
+            self._proc.wait()   # already killed: returns immediately
+        try:
+            self._proc = subprocess.Popen(
+                [*self._cmd, text], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            print(f"[VOICE] speech failed: {e}")
+            self._proc = None
+
+    def close(self):
+        if self.busy():
+            self._proc.kill()
 
 
 class Esp32Link:
     """Raw Bluetooth RFCOMM socket link to the ESP32. Connects lazily,
-    retries on a cooldown after a failure rather than blocking the main
-    loop on every frame, and never raises - a disconnected ESP32 shouldn't
-    crash driver monitoring.
+    retries on a cooldown after a failure, and never raises - a
+    disconnected ESP32 shouldn't crash driver monitoring.
 
-    Deliberately synchronous - see _speak()'s docstring for why. This
-    class was threaded twice in this project's history and both times
-    caused a severe, hard-to-diagnose freeze (proven via git bisect the
-    second time): _prime_acl_link() below calls subprocess.run()
-    (bluetoothctl), and spawning a subprocess via fork() from a
-    background thread in a process that also has Qt loaded (cv2.imshow())
-    is a real Linux hazard, not a performance-only tradeoff. A reconnect
-    attempt can legitimately take several real seconds when the ESP32 is
-    unreachable and will freeze frame processing for that long when it
-    fires - a real, known cost, but the correct one to pay compared to
-    the alternative. _last_attempt is stamped *after* the attempt
-    completes, not before - that ordering is what makes the reconnect
-    cooldown actually cool down instead of the very next frame
-    immediately blocking on another attempt too (confirmed root cause of
-    a separate ~0.1 FPS regression, before this class was ever threaded).
+    Reconnecting is a NON-BLOCKING state machine driven from the main loop:
+    each call to send() advances it by at most one cheap step and returns
+    immediately. A reconnect used to run as one blocking sequence on a
+    single frame - `bluetoothctl connect` (up to 10 s), a 2 s settle sleep,
+    then a connect() with no timeout - which could freeze frame processing
+    for well over 5 s. That broke the >= 0.2 Hz risk-classification
+    requirement (a classification at least every 5 s) whenever the ESP32
+    dropped out, exactly the moment monitoring matters most.
+
+        IDLE -> PRIMING -> SETTLING -> CONNECTING -> connected
+          ^________ on any failure, after RECONNECT_COOLDOWN _______|
+
+    Deliberately NOT a background thread. This class was threaded twice in
+    this project's history and both times caused a severe freeze (proven by
+    git bisect the second time): spawning a subprocess via fork() from a
+    background thread while Qt is loaded (cv2.imshow()) is a real Linux
+    hazard. Everything here - including the bluetoothctl spawn - still
+    happens on the main thread, exactly as before; it just no longer waits.
     """
+
+    IDLE, PRIMING, SETTLING, CONNECTING = "IDLE", "PRIMING", "SETTLING", "CONNECTING"
+    PRIME_TIMEOUT_SEC = 10.0    # give up on bluetoothctl after this long
+    SETTLE_SEC = 2.0            # let the ACL link come up before connecting
+    # Upper bound on a connect() that is still in progress. Deliberately
+    # generous, and it only ABANDONS a stuck attempt - it never shortens a
+    # live handshake the way a socket timeout did (a 2 s connect timeout was
+    # confirmed to cut the RFCOMM handshake mid-negotiation, surfacing as
+    # "[Errno 52] Invalid exchange").
+    CONNECT_ABANDON_SEC = 20.0
 
     def __init__(self):
         self._sock = None
-        self._last_attempt = 0.0
         self._consecutive_send_failures = 0
+        self._state = self.IDLE
+        self._next_attempt_at = 0.0
+        self._deadline = 0.0
+        self._proc = None
+        self._pending = None
 
-    def _prime_acl_link(self):
-        """A cold raw RFCOMM socket connect() to this ESP32 reliably fails
-        with `[Errno 52] Invalid exchange` - confirmed on this hardware -
-        unless the underlying ACL (baseband) link is already up.
-        `bluetoothctl connect` establishes that link even though it
-        reports a spurious "profile unavailable" error for SPP (bluetoothd
-        has no generic serial-port profile handler registered - harmless,
-        we don't need it to succeed, just to bring the link up).
+    def _prime_start(self, now):
+        """A cold raw RFCOMM connect() to this ESP32 reliably fails with
+        `[Errno 52] Invalid exchange` - confirmed on this hardware - unless
+        the underlying ACL (baseband) link is already up. `bluetoothctl
+        connect` establishes it even though it reports a spurious "profile
+        unavailable" error for SPP (bluetoothd has no generic serial-port
+        profile handler - harmless, we only need the link up). It returns
+        as soon as the request is *sent*, hence the settle step after it.
 
-        `bluetoothctl connect <MAC>` run as a one-shot command returns as
-        soon as the connect request is *sent*, not once the link is
-        actually up (unlike watching it interactively, where you naturally
-        wait to see "Connected: yes" before doing anything else) - so a
-        short sleep after it is needed to let the link actually settle
-        before the raw socket connect below. Best effort throughout:
-        failures/timeouts here are logged but not fatal, the raw socket
-        connect right after is the real attempt.
-
-        bluetoothctl is a Linux/BlueZ tool - it doesn't exist on Windows,
-        so on a dev machine this always fails instantly, but the 2s settle
-        sleep below used to run anyway regardless, purely wasted (measured:
-        ~270ms/frame average, dominating the whole frame budget, from one
-        reconnect attempt landing in a profiling window). Skipped entirely
-        off Linux since neither step does anything meaningful there.
+        bluetoothctl is Linux/BlueZ-only, so off Linux priming is skipped
+        and we go straight to connecting.
         """
         if not sys.platform.startswith("linux"):
+            self._connect_start(now)
             return
         try:
-            result = subprocess.run(
+            self._proc = subprocess.Popen(
                 ["bluetoothctl", "connect", config.ESP32_MAC_ADDRESS],
-                capture_output=True, timeout=10, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                stdin=subprocess.DEVNULL, text=True,
             )
-            print(f"[ESP32] bluetoothctl connect: {result.stdout.strip() or result.stderr.strip()}")
         except Exception as e:
             print(f"[ESP32] bluetoothctl connect failed to run: {e}")
-        time.sleep(2.0)  # let the ACL link actually settle before the raw socket connect
+            self._proc = None
+        self._state = self.PRIMING
+        self._deadline = now + self.PRIME_TIMEOUT_SEC
+
+    def _connect_start(self, now):
+        try:
+            sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,
+                                 socket.BTPROTO_RFCOMM)
+            sock.setblocking(False)
+            err = sock.connect_ex((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
+        except Exception as e:
+            self._fail(now, e)
+            return
+        if err == 0:
+            self._connected(sock)
+        elif err in (errno.EINPROGRESS, errno.EAGAIN, errno.EALREADY):
+            self._pending = sock
+            self._state = self.CONNECTING
+            self._deadline = now + self.CONNECT_ABANDON_SEC
+        else:
+            sock.close()
+            self._fail(now, OSError(err, os.strerror(err)))
+
+    def _connected(self, sock):
+        # Back to blocking with a timeout for the actual sends. 0.2 s was
+        # too aggressive for this link and a single slow send (the very first
+        # one after connecting) tore the connection down over a transient
+        # hiccup - see _consecutive_send_failures in send() for the rest.
+        sock.settimeout(2.0)
+        self._sock = sock
+        self._pending = None
+        self._state = self.IDLE
+        self._consecutive_send_failures = 0
+        print(f"[ESP32] Connected to {config.ESP32_MAC_ADDRESS}")
+
+    def _fail(self, now, reason):
+        if self._pending is not None:
+            try:
+                self._pending.close()
+            except Exception:
+                pass
+            self._pending = None
+        self._state = self.IDLE
+        # Cooldown measured from when the attempt ENDED, not when it began -
+        # otherwise an attempt longer than the cooldown would immediately
+        # trigger the next one (the cause of an earlier ~0.1 FPS regression).
+        self._next_attempt_at = now + config.ESP32_RECONNECT_COOLDOWN_SEC
+        print(f"[ESP32] Could not connect to {config.ESP32_MAC_ADDRESS}: {reason} "
+              f"(will retry in {config.ESP32_RECONNECT_COOLDOWN_SEC:.0f}s)")
+
+    def _advance(self, now):
+        """Move the reconnect state machine forward by at most one step.
+        Never blocks: every wait is a timestamp comparison or a zero-timeout
+        poll/select."""
+        if self._state == self.IDLE:
+            if now >= self._next_attempt_at:
+                self._prime_start(now)
+        elif self._state == self.PRIMING:
+            done = self._proc is None or self._proc.poll() is not None
+            if not done and now < self._deadline:
+                return
+            if self._proc is not None:
+                if not done:
+                    self._proc.kill()
+                    try:
+                        self._proc.wait(timeout=0.5)   # reap it; SIGKILL exits near-instantly
+                    except Exception:
+                        pass
+                    print("[ESP32] bluetoothctl connect timed out")
+                else:
+                    out = (self._proc.communicate()[0] or "").strip()   # already exited: returns at once
+                    print(f"[ESP32] bluetoothctl connect: {out}")
+                self._proc = None
+            self._state = self.SETTLING
+            self._deadline = now + self.SETTLE_SEC
+        elif self._state == self.SETTLING:
+            if now >= self._deadline:
+                self._connect_start(now)
+        elif self._state == self.CONNECTING:
+            try:
+                _, writable, errored = select.select([], [self._pending], [self._pending], 0)
+            except Exception as e:
+                self._fail(now, e)
+                return
+            if not writable and not errored:
+                if now >= self._deadline:
+                    self._fail(now, f"connect still pending after {self.CONNECT_ABANDON_SEC:.0f}s")
+                return
+            err = self._pending.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if err:
+                self._fail(now, OSError(err, os.strerror(err)))
+            else:
+                self._connected(self._pending)
 
     def _ensure_open(self):
         if self._sock is not None:
             return self._sock
         if not config.ESP32_LINK_ENABLED or not _BLUETOOTH_SOCKETS_AVAILABLE:
             return None
-
-        now = time.time()
-        if now - self._last_attempt < config.ESP32_RECONNECT_COOLDOWN_SEC:
-            return None
-
-        self._prime_acl_link()
-
-        try:
-            sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM, socket.BTPROTO_RFCOMM)
-            # No timeout for connect() itself: a Classic Bluetooth RFCOMM
-            # handshake can legitimately take a few seconds, especially
-            # right after _prime_acl_link() above. This call blocks the
-            # frame it's called from, but only during the rare reconnect
-            # attempt, not steady-state.
-            sock.connect((config.ESP32_MAC_ADDRESS, config.ESP32_RFCOMM_PORT))
-            # 0.2s here was too aggressive for this link and a single slow
-            # send (confirmed: the very first one, right after connecting)
-            # tore the whole connection down over a transient hiccup - see
-            # _consecutive_send_failures below for the other half of this fix.
-            sock.settimeout(2.0)
-            self._sock = sock
-            self._consecutive_send_failures = 0
-            print(f"[ESP32] Connected to {config.ESP32_MAC_ADDRESS}")
-        except Exception as e:
-            print(f"[ESP32] Could not connect to {config.ESP32_MAC_ADDRESS}: {e} "
-                  f"(will retry in {config.ESP32_RECONNECT_COOLDOWN_SEC:.0f}s)")
-            self._sock = None
-        finally:
-            # Stamped *after* the blocking connect attempt above, not
-            # before - see the class docstring for why that ordering
-            # matters (it's what makes the cooldown actually cooldown).
-            self._last_attempt = time.time()
+        self._advance(time.monotonic())
         return self._sock
 
     def send(self, risk_name: str, case: str):
@@ -239,6 +327,7 @@ class AlertSystem:
         self._last_high_speak = 0.0
         self._last_esp32_send = 0.0
         self._esp32 = Esp32Link()
+        self._voice = Voice()
 
     def dispatch(self, risk: Risk, messages: list[str], case: str = "NONE"):
         now = time.time()
@@ -250,21 +339,20 @@ class AlertSystem:
 
         if risk == Risk.LOW:
             if changed:
-                _speak(messages[0] if messages else "Please stay focused.")
+                self._voice.say(messages[0] if messages else "Please stay focused.")
         elif risk == Risk.MEDIUM:
             if changed:
-                _speak(messages[0] if messages else "Warning: please pay attention.")
+                self._voice.say(messages[0] if messages else "Warning: please pay attention.")
         elif risk == Risk.HIGH:
             # Deliberately NOT gated by `changed` alone like LOW/MEDIUM -
             # HIGH re-speaks continuously as a sustained alarm for as long
-            # as the danger persists. But _speak() blocks the video loop
-            # for the length of the utterance, so it's rate-limited to
-            # HIGH_RISK_VOICE_REPEAT_SEC instead of firing every frame -
-            # still a repeating alarm, just not one that stalls frame
-            # processing faster than it can finish speaking.
+            # as the danger persists, rate-limited to HIGH_RISK_VOICE_REPEAT_SEC.
+            # A repeat never cuts off the previous one mid-sentence
+            # (interrupt=False); a fresh escalation to HIGH does.
             if changed or now - self._last_high_speak >= config.HIGH_RISK_VOICE_REPEAT_SEC:
                 self._last_high_speak = now
-                _speak(messages[0] if messages else "Warning. Please respond immediately.")
+                self._voice.say(messages[0] if messages else "Warning. Please respond immediately.",
+                                interrupt=changed)
             if changed:
                 print("[DASHBOARD] HIGH RISK ALERT -", " / ".join(messages))
 
@@ -273,3 +361,6 @@ class AlertSystem:
         if now - self._last_esp32_send >= config.ESP32_SEND_INTERVAL_SEC:
             self._last_esp32_send = now
             self._esp32.send(risk.name, case)
+
+    def close(self):
+        self._voice.close()
