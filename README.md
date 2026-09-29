@@ -70,6 +70,7 @@ DriverGuardian/
 cd DriverGuardian
 python -m venv .venv
 .venv\Scripts\activate        # Windows
+source .venv/bin/activate     # MacOs
 pip install -r requirements.txt
 ```
 

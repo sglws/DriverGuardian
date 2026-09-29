@@ -82,7 +82,7 @@ class RiskEngine:
         # Deliberately passive while pending: reported as WAITING, which
         # triggers no voice and no actuators. It is still sent to the ESP32
         # on the normal interval - going silent instead would trip the
-        # ESP32's 3 s link-loss watchdog and set off the full HIGH alarm
+        # ESP32's 6 s link-loss watchdog (BT_TIMEOUT_MS) and set off the full HIGH alarm
         # (buzzer, vibration, hazards) while the driver is just buckling up.
         # The system waits quietly, then starts monitoring the moment the
         # belt is on.

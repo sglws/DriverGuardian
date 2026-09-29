@@ -193,7 +193,7 @@ EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
 # While the belt is still off the system stays deliberately quiet: it reports
 # the WAITING state, which triggers no voice and no ESP32 actuators. WAITING
 # is still sent on the normal ESP32 interval rather than going silent - the
-# ESP32 treats 3 s of silence as a lost link and raises the full HIGH alarm.
+# ESP32 treats 6 s of silence (BT_TIMEOUT_MS) as a lost link and raises the full HIGH alarm.
 # Getting in and buckling up is normal behaviour, not a fault to alarm about.
 # The moment the belt is confirmed, normal monitoring begins.
 #
@@ -274,7 +274,15 @@ SEATBELT_UNWORN_ESCALATE_SEC = 10.0
 # (hands, steering, camera angle), so re-confirming "on" should be fast;
 # a real removal is sustained, so confirming "off" should be patient.
 SEATBELT_ON_CONFIRM_SEC = 0.5    # belt seen worn -> confirm "on" quickly
-SEATBELT_OFF_CONFIRM_SEC = 6.0   # belt continuously unseen this long -> confirm "off"
+SEATBELT_OFF_CONFIRM_SEC = 12.0  # belt continuously unseen this long -> confirm "off".
+                                 # Raised from 6.0: this only ever applies AFTER the belt
+                                 # has been confirmed worn at least once (see
+                                 # _seatbelt_ever_seen in yolo_detector.py), so a belt that
+                                 # drops out of view is far more likely occluded - hands,
+                                 # steering, arm across the chest, camera angle - than
+                                 # actually unbuckled mid-drive. Being patient here costs
+                                 # little because a genuine removal stays unseen and still
+                                 # trips, just later.
 
 # K-of-N voting: an object flag only counts as active once it appears in at
 # least YOLO_CONFIRM_MIN of the last YOLO_CONFIRM_WINDOW inferences. Symmetric

@@ -46,3 +46,6 @@ datasets/test/labels/*
 models/*.pt
 !models/yolo11n.pt
 !models/best.pt
+
+# ESP32 firmware sketches - kept out of git
+esp32/
