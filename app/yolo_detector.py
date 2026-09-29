@@ -379,6 +379,11 @@ class YoloProcess:
 
     def __init__(self):
         weights, self.using_finetuned = select_weights()
+        if not config.YOLO_ENABLED:
+            # Diagnostics only. using_finetuned=False also skips the
+            # pre-drive seatbelt gate, which would otherwise wait forever.
+            print("[yolo] object detection DISABLED (YOLO_ENABLED = False)")
+            weights, self.using_finetuned = None, False
         self.available = weights is not None
         size = config.YOLO_IMG_SIZE
         self._send_width = max(size) if isinstance(size, (tuple, list)) else size

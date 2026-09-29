@@ -250,6 +250,7 @@ LOW_LIGHT_BRIGHTNESS_THRESHOLD = 60.0  # mean grayscale brightness below this ->
 # happens afterward in yolo_detector.py via YOLO_CLASS_CONF_THRESHOLDS below,
 # so this just needs to be <= the lowest per-class threshold to make sure
 # nothing potentially useful gets discarded before that logic runs.
+YOLO_ENABLED = True   # False = no object detection at all (diagnostics only)
 YOLO_CONF_THRESHOLD = 0.20
 
 # Per-class confidence floor, applied in yolo_detector.py after the raw
@@ -427,3 +428,28 @@ ESP32_RECONNECT_MAX_COOLDOWN_SEC = 30.0  # ...doubling on each further failure, 
 ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing down + reconnecting
                                      # (a single slow send is often just a transient hiccup, not a
                                      # real disconnect - see Esp32Link.send() in alerts.py)
+
+
+# --------------------------------------------------------------------------
+# Quick experiments without editing this file - environment variables
+# override the settings above for one run, e.g.:
+#     DG_DISPLAY=0 python -m app.main
+#     DG_CAMERA_FPS=15 DG_DISPLAY_SCALE=0.5 python -m app.main
+# --------------------------------------------------------------------------
+_ENV_OVERRIDES = {
+    "DG_DISPLAY": ("DISPLAY_ENABLED", bool),
+    "DG_DISPLAY_SCALE": ("DISPLAY_SCALE", float),
+    "DG_DISPLAY_EVERY": ("DISPLAY_EVERY_N_FRAMES", int),
+    "DG_CAMERA_FPS": ("CAMERA_FPS", int),
+    "DG_YOLO": ("YOLO_ENABLED", bool),
+    "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
+    "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
+}
+for _var, (_name, _type) in _ENV_OVERRIDES.items():
+    if _var in os.environ:
+        _raw = os.environ[_var].strip()
+        globals()[_name] = (_raw.lower() not in ("0", "false", "no", "off")) if _type is bool else _type(_raw)
+        if _name == "YOLO_USE_16X9_MODEL" and globals()[_name]:
+            YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_384x640_ncnn_model")
+            YOLO_IMG_SIZE = (384, 640)
+        print(f"[config] {_name} = {globals()[_name]!r}  (from {_var})")

@@ -11,6 +11,7 @@ thread-pool environment. It exits when the app closes the connection,
 including when the app itself crashes or is killed.
 """
 
+import os
 import sys
 import time
 from multiprocessing.connection import Connection
@@ -21,6 +22,13 @@ cv2.setNumThreads(1)   # letterbox resize only; inference has its own pool
 
 
 def main():
+    # Lowest CPU priority (the app itself runs at nice +10, inherited here):
+    # YOLO has ~0.4 s of slack per frame, so it can always wait for the
+    # desktop compositor, audio and the main monitoring loop to go first.
+    try:
+        os.nice(19 - os.nice(0))
+    except OSError:
+        pass
     conn = Connection(int(sys.argv[1]))
     from app.yolo_detector import YoloDetector, DetectionConfirmer
     detector, confirmer = YoloDetector(), DetectionConfirmer()
