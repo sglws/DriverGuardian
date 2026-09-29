@@ -4,6 +4,8 @@ utils.py
 Small shared helper functions used across modules.
 """
 
+import glob
+import os
 import subprocess
 import time
 import cv2
@@ -26,37 +28,53 @@ _THROTTLE_FLAGS = {
 }
 
 
+def _read_sysfs_thermal():
+    """(temp_c, throttled_bits) straight from the kernel's files - no
+    subprocess, microseconds. None where the files don't exist."""
+    try:
+        with open("/sys/class/thermal/thermal_zone0/temp") as f:
+            temp_c = int(f.read().strip()) / 1000.0
+        paths = glob.glob("/sys/devices/platform/soc*/soc*:firmware/get_throttled")
+        if not paths:
+            return None
+        with open(paths[0]) as f:
+            throttled_bits = int(f.read().strip(), 16)
+        return temp_c, throttled_bits
+    except (OSError, ValueError):
+        return None
+
+
 def check_pi_thermal_status() -> dict:
-    """Reads CPU temp + throttle state via vcgencmd (Raspberry Pi firmware
-    tool). Sudden, intermittent FPS drops are a classic symptom of thermal
-    throttling or under-voltage - no software fix elsewhere in this app can
-    solve that, it needs a hardware fix (better PSU, heatsink/fan), so it's
-    worth ruling in/out directly rather than guessing from software timing
-    alone.
+    """CPU temp + throttle state. Sudden, intermittent FPS drops are a
+    classic symptom of thermal throttling or under-voltage - no software
+    fix elsewhere in this app can solve that, it needs a hardware fix
+    (better PSU, heatsink/fan), so it's worth ruling in/out directly.
 
-    Returns {"available": False} on anything but a real Pi (vcgencmd simply
-    doesn't exist elsewhere - e.g. the Windows dev machine this was mostly
-    profiled on this session, which is exactly why this was never actually
-    checked until now).
+    Read from sysfs when available (Raspberry Pi OS exposes both); falls
+    back to `vcgencmd`, which costs a process spawn on the main loop -
+    this runs every PROFILE_LOG_INTERVAL_SEC, so that showed up as a
+    periodic stall. Returns {"available": False} on anything but a Pi.
     """
-    try:
-        temp_out = subprocess.run(
-            ["vcgencmd", "measure_temp"], capture_output=True, timeout=2, text=True,
-        )
-        throttled_out = subprocess.run(
-            ["vcgencmd", "get_throttled"], capture_output=True, timeout=2, text=True,
-        )
-    except Exception:
-        return {"available": False}
-
-    if temp_out.returncode != 0 or throttled_out.returncode != 0:
-        return {"available": False}
-
-    try:
-        temp_c = float(temp_out.stdout.strip().split("=")[1].rstrip("'C\n"))
-        throttled_bits = int(throttled_out.stdout.strip().split("=")[1], 16)
-    except (IndexError, ValueError):
-        return {"available": False}
+    sysfs = _read_sysfs_thermal()
+    if sysfs is not None:
+        temp_c, throttled_bits = sysfs
+    else:
+        try:
+            temp_out = subprocess.run(
+                ["vcgencmd", "measure_temp"], capture_output=True, timeout=2, text=True,
+            )
+            throttled_out = subprocess.run(
+                ["vcgencmd", "get_throttled"], capture_output=True, timeout=2, text=True,
+            )
+        except Exception:
+            return {"available": False}
+        if temp_out.returncode != 0 or throttled_out.returncode != 0:
+            return {"available": False}
+        try:
+            temp_c = float(temp_out.stdout.strip().split("=")[1].rstrip("'C\n"))
+            throttled_bits = int(throttled_out.stdout.strip().split("=")[1], 16)
+        except (IndexError, ValueError):
+            return {"available": False}
 
     active_flags = [label for bit, label in _THROTTLE_FLAGS.items() if throttled_bits & (1 << bit)]
     return {
@@ -64,6 +82,28 @@ def check_pi_thermal_status() -> dict:
         "temp_c": temp_c,
         "throttled_bits": throttled_bits,
         "flags": active_flags,
+    }
+
+
+def system_status():
+    """Load average, free RAM, swap use, and this process's memory/thread
+    count - read straight from /proc (no subprocess). None off Linux."""
+    try:
+        with open("/proc/meminfo") as f:
+            mem = {k: int(v.split()[0]) for k, v in
+                   (line.split(":", 1) for line in f if ":" in line)}
+        with open("/proc/self/status") as f:
+            me = {k: v.strip() for k, v in (line.split(":", 1) for line in f if ":" in line)}
+        load1 = os.getloadavg()[0]
+    except (OSError, ValueError):
+        return None
+    return {
+        "load1": load1,
+        "cores": os.cpu_count(),
+        "mem_available_mb": mem.get("MemAvailable", 0) / 1024,
+        "swap_used_mb": (mem.get("SwapTotal", 0) - mem.get("SwapFree", 0)) / 1024,
+        "rss_mb": int(me.get("VmRSS", "0 kB").split()[0]) / 1024,
+        "threads": int(me.get("Threads", "0")),
     }
 
 

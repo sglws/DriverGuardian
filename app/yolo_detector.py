@@ -16,15 +16,31 @@ at all (not in COCO's 80 classes), so those come back as None (meaning
 "unknown / not yet supported") rather than False.
 """
 
+import importlib.util
 import os
+import subprocess
+import sys
 import threading
 import time
 from collections import deque
+from multiprocessing import Pipe
+
+import cv2
 
 from app import config, utils
 
-try:
-    from ultralytics import YOLO
+# ultralytics/torch/ncnn are imported lazily, only by the process that runs
+# inference (see YoloProcess) - the main app process never loads them,
+# which also keeps several hundred MB of torch out of its memory.
+_ULTRALYTICS_AVAILABLE = importlib.util.find_spec("ultralytics") is not None
+YOLO = None
+
+
+def _load_backends():
+    global YOLO
+    if YOLO is not None:
+        return
+    from ultralytics import YOLO as _YOLO
     import torch
     # See config.YOLO_INFERENCE_THREADS - left uncapped, a single predict()
     # call grabs every CPU core for its duration, which starves the
@@ -32,15 +48,28 @@ try:
     # just this app. Covers the plain .pt/PyTorch backend; the NCNN
     # backend below has its own separate thread pool, capped independently.
     torch.set_num_threads(config.YOLO_INFERENCE_THREADS)
-    _ULTRALYTICS_AVAILABLE = True
-except ImportError:
-    _ULTRALYTICS_AVAILABLE = False
+    try:
+        import ncnn as _ncnn
+        _ncnn.set_omp_num_threads(config.YOLO_INFERENCE_THREADS)
+    except ImportError:
+        pass  # only installed/needed if an NCNN export is actually present
+    YOLO = _YOLO
 
-try:
-    import ncnn as _ncnn
-    _ncnn.set_omp_num_threads(config.YOLO_INFERENCE_THREADS)
-except ImportError:
-    pass  # only installed/needed if a models/best_ncnn_model/ export is actually present
+
+def select_weights():
+    """(weights_path, using_finetuned) - the model YoloDetector will load,
+    decided from the files present, without loading anything."""
+    if not _ULTRALYTICS_AVAILABLE:
+        return None, False
+    if os.path.exists(config.YOLO_NCNN_PATH):
+        # Same weights/classes as best.pt, just a faster CPU backend -
+        # see config.YOLO_NCNN_PATH.
+        return config.YOLO_NCNN_PATH, True
+    if os.path.exists(config.YOLO_FINETUNED_PATH):
+        return config.YOLO_FINETUNED_PATH, True
+    if os.path.exists(config.YOLO_PRETRAINED_PATH):
+        return config.YOLO_PRETRAINED_PATH, False
+    return None, False
 
 _VOTED_KEYS = ("phone", "consumption", "cigarette")
 
@@ -117,27 +146,18 @@ class YoloDetector:
                   "Install with: pip install ultralytics")
             return
 
-        weights_path = None
-        if os.path.exists(config.YOLO_NCNN_PATH):
-            # Same weights/classes as best.pt, just a faster CPU backend -
-            # see config.YOLO_NCNN_PATH. ultralytics.YOLO() auto-detects the
-            # NCNN directory format and returns the same Results/Boxes API
-            # (.xyxy/.conf/.cls) as the .pt path below, so nothing else in
-            # this file needs to branch on which backend is loaded.
-            weights_path = config.YOLO_NCNN_PATH
-            self.using_finetuned = True
-        elif os.path.exists(config.YOLO_FINETUNED_PATH):
-            weights_path = config.YOLO_FINETUNED_PATH
-            self.using_finetuned = True
-        elif os.path.exists(config.YOLO_PRETRAINED_PATH):
-            weights_path = config.YOLO_PRETRAINED_PATH
-        else:
+        # ultralytics.YOLO() auto-detects the NCNN directory format and
+        # returns the same Results/Boxes API (.xyxy/.conf/.cls) as a .pt, so
+        # nothing else in this file needs to branch on the backend.
+        weights_path, self.using_finetuned = select_weights()
+        if weights_path is None:
             print(f"[yolo_detector] No weights found at "
                   f"{config.YOLO_PRETRAINED_PATH} or {config.YOLO_FINETUNED_PATH}. "
                   f"Download yolo11n.pt (see README) to enable detection.")
             return
 
-        self.model = YOLO(weights_path)
+        _load_backends()
+        self.model = YOLO(weights_path, task="detect")
         self.class_names = self.model.names  # {index: name}
         print(f"[yolo_detector] Loaded {'FINE-TUNED' if self.using_finetuned else 'PRETRAINED'} "
               f"model: {weights_path}")
@@ -277,26 +297,12 @@ _EMPTY_YOLO_STATE = {
 
 
 class YoloWorker:
-    """Runs YoloDetector.detect() + DetectionConfirmer.update() on its own
-    background thread, so YOLO's per-call cost (much higher than its
-    *average* in [PROFILE] - it only runs every YOLO_INFER_EVERY_N_FRAMES
-    frames, so the average hides a real spike concentrated on that one
-    frame) doesn't land as a stall on the main video loop.
-
-    This is a different situation from Esp32Link/TTS's threading, which
-    caused a proven, severe freeze - confirmed via git bisect - from
-    spawning a subprocess (bluetoothctl) via fork() from a background
-    thread while Qt was loaded. Nothing in this class ever calls
-    subprocess.run() or forks a process; it's pure CPU inference, so it
-    doesn't hit that hazard. The other risk from this app's *first*
-    YOLO-threading attempt - NCNN's own internal thread pool competing
-    with the rest of the process for CPU cores - is now actually
-    addressed too (config.YOLO_INFERENCE_THREADS caps it, and main.py
-    reserves cores via CPU affinity), neither of which existed back then.
-
-    Same submit()/get_latest() pattern as Esp32Link.set_state(): the main
-    thread only ever hands off a frame and reads back a cached result,
-    both instant and thread-safe - it never waits on inference itself.
+    """Fallback only (Windows, where YoloProcess can't hand a socket to a
+    child process): YOLO on a background thread. Works, but NCNN holds the
+    GIL for the whole inference, so the main loop still stalls while it
+    runs - see YoloProcess for the measurement and the real fix.
+    Nothing here ever forks, so it avoids this project's fork-from-a-thread
+    freeze; submit()/get_latest() never block.
     """
 
     def __init__(self, yolo_detector: YoloDetector, confirmer: DetectionConfirmer):
@@ -344,6 +350,133 @@ class YoloWorker:
                 continue
             frame, mouth_roi = pending
             raw_state = self._yolo.detect(frame, mouth_roi=mouth_roi)
-            confirmed = self._confirmer.update(raw_state, time.time())
+            confirmed = self._confirmer.update(raw_state, time.monotonic())
             with self._lock:
                 self._latest_state = confirmed
+
+
+class YoloProcess:
+    """Runs YOLO in its OWN PROCESS so it can never stall the video loop.
+
+    Why not a thread (YoloWorker above): measured directly, NCNN's Python
+    binding holds the GIL for the whole inference - a 21.5 ms inference
+    froze the main thread for 22.6 ms on a Mac, and on the Pi an inference
+    takes several times longer, every YOLO_INTERVAL_SEC. A separate process
+    has its own interpreter, so the main loop keeps running at full speed
+    while YOLO works on other cores.
+
+    Started with subprocess from the main thread (never fork() from a
+    background thread - this project's proven freeze), as a clean
+    `python -m app.yolo_service` that imports only what inference needs.
+    Frames go over a socket pair, downscaled to the width YOLO uses anyway
+    (it letterboxes to YOLO_IMG_SIZE internally, so no detail is lost).
+    Only one frame is ever in flight: submit() is skipped while the
+    previous one is still being processed, so nothing queues up and the
+    main loop never waits. If the process dies it is restarted.
+    """
+
+    RESTART_COOLDOWN_SEC = 5.0
+
+    def __init__(self):
+        weights, self.using_finetuned = select_weights()
+        self.available = weights is not None
+        size = config.YOLO_IMG_SIZE
+        self._send_width = max(size) if isinstance(size, (tuple, list)) else size
+        self._latest = dict(_EMPTY_YOLO_STATE)
+        self._conn = self._proc = None
+        self._busy = False
+        self._restart_at = 0.0
+        self._fallback = None
+        if self.available and sys.platform == "win32":
+            self._fallback = YoloWorker(YoloDetector(), DetectionConfirmer())
+        elif self.available:
+            self._start()
+
+    def _start(self):
+        parent, child = Pipe(duplex=True)
+        try:
+            self._proc = subprocess.Popen(
+                [sys.executable, "-m", "app.yolo_service", str(child.fileno())],
+                pass_fds=(child.fileno(),), cwd=config.BASE_DIR, stdin=subprocess.DEVNULL,
+            )
+        except Exception as e:
+            print(f"[yolo] could not start the YOLO process: {e}")
+            parent.close()
+            self._conn = self._proc = None
+            self._restart_at = time.monotonic() + self.RESTART_COOLDOWN_SEC
+            return
+        finally:
+            child.close()
+        self._conn = parent
+        self._busy = True   # until the service reports it has loaded the model
+
+    def _died(self):
+        print("[yolo] YOLO process stopped - restarting it "
+              f"in {self.RESTART_COOLDOWN_SEC:.0f}s (object detection paused meanwhile)")
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+        if self._proc is not None and self._proc.poll() is None:
+            self._proc.kill()
+        self._conn = self._proc = None
+        self._busy = False
+        self._restart_at = time.monotonic() + self.RESTART_COOLDOWN_SEC
+
+    def _drain(self):
+        if self._conn is None:
+            if self.available and time.monotonic() >= self._restart_at:
+                self._start()
+            return
+        try:
+            while self._conn.poll():
+                msg = self._conn.recv()
+                if msg.get("type") == "ready":
+                    self._busy = False
+                else:
+                    self._latest = msg
+                    self._busy = False
+        except (EOFError, OSError):
+            self._died()
+
+    def submit(self, frame, mouth_roi) -> bool:
+        """Hand a frame to YOLO if it's idle. Never blocks. Returns True if sent."""
+        if self._fallback is not None:
+            self._fallback.submit(frame, mouth_roi)
+            return True
+        self._drain()
+        if self._conn is None or self._busy:
+            return False
+        h, w = frame.shape[:2]
+        scale = min(1.0, self._send_width / w)
+        if scale < 1.0:
+            frame = cv2.resize(frame, (round(w * scale), round(h * scale)), interpolation=cv2.INTER_AREA)
+        roi = tuple(v * scale for v in mouth_roi) if mouth_roi is not None else None
+        try:
+            self._conn.send((frame, roi, scale))
+        except (OSError, EOFError):
+            self._died()
+            return False
+        self._busy = True
+        return True
+
+    def get_latest(self) -> dict:
+        if self._fallback is not None:
+            return self._fallback.get_latest()
+        self._drain()
+        return self._latest
+
+    def close(self):
+        if self._fallback is not None:
+            self._fallback.close()
+        if self._conn is not None:
+            try:
+                self._conn.send(None)
+                self._conn.close()
+            except Exception:
+                pass
+        if self._proc is not None:
+            try:
+                self._proc.wait(timeout=2)
+            except Exception:
+                self._proc.kill()

@@ -8,6 +8,7 @@ since it's typically fastest on Pi's ARM CPU).
 Usage:
     python training/export.py --format onnx
     python training/export.py --format ncnn
+    python training/export.py --format ncnn --imgsz 384 640   # 16:9, ~40% less compute
 """
 
 import argparse
@@ -26,13 +27,17 @@ except ImportError:
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--format", default="onnx", choices=["onnx", "ncnn", "tflite", "openvino"])
+    parser.add_argument("--imgsz", type=int, nargs="+", default=None,
+                        help="export size: one value (square) or HEIGHT WIDTH, e.g. 384 640 "
+                             "for the 16:9 camera frame (default: config.YOLO_IMG_SIZE)")
     args = parser.parse_args()
+    imgsz = (args.imgsz[0] if len(args.imgsz) == 1 else tuple(args.imgsz)) if args.imgsz else config.YOLO_IMG_SIZE
 
     if not os.path.exists(config.YOLO_FINETUNED_PATH):
         raise SystemExit(f"No fine-tuned model found at {config.YOLO_FINETUNED_PATH}.")
 
     model = YOLO(config.YOLO_FINETUNED_PATH)
-    exported_path = model.export(format=args.format, imgsz=config.YOLO_IMG_SIZE)
+    exported_path = model.export(format=args.format, imgsz=imgsz)
     print(f"Exported to: {exported_path}")
     print("Copy this file to the Raspberry Pi and point yolo_detector.py at it "
           "(update YOLO_FINETUNED_PATH in config.py, or swap the loader for the "

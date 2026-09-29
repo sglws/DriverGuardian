@@ -20,6 +20,7 @@ Thumbs.db
 
 # --- Runtime artifacts (regenerated every run, not useful in history) ---
 logs/*.csv
+assets/voice_cache/
 outputs/*
 !outputs/.gitkeep
 

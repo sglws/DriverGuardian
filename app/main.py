@@ -18,10 +18,38 @@ import os
 import time
 from collections import deque
 
-import cv2
-import numpy as np
+# ---- Keep the rest of the Pi responsive while this app runs ----
+# Everything in this block must run BEFORE numpy/cv2/mediapipe/ncnn are
+# imported: thread-pool sizes are read from the environment once at library
+# load, and CPU priority/affinity are inherited by every thread created
+# afterwards - so every library thread ends up covered, not just ours.
+#
+# 1. OpenMP (NCNN's YOLO threads) sleeps between inferences instead of
+#    busy-spinning on the CPU, and BLAS pools stay single-threaded.
+_APP_THREADS = str(max(1, (os.cpu_count() or 4) - 2))
+os.environ.setdefault("OMP_NUM_THREADS", _APP_THREADS)
+os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-# Reserve one CPU core exclusively for the desktop compositor/window
+from app import config  # noqa: E402  (config only imports os)
+
+# 2. Lower CPU priority. Pinning to fewer cores (below) still leaves this
+#    app competing on equal terms with the desktop compositor, audio
+#    (PipeWire, Bluetooth speaker) and bluetoothd on every core it uses -
+#    and memory bandwidth and heat are shared across all cores anyway. At a
+#    lower priority the kernel always serves those first; the app only
+#    loses time when the system genuinely needs it, so monitoring FPS is
+#    unaffected on an otherwise idle Pi.
+if config.APP_NICE and hasattr(os, "nice"):
+    try:
+        os.nice(config.APP_NICE)
+        print(f"[main] Running at lower CPU priority (nice +{config.APP_NICE}) "
+              f"so the desktop, audio and Bluetooth stay responsive")
+    except OSError as e:
+        print(f"[main] Could not lower CPU priority: {e}")
+
+# 3. Reserve one CPU core exclusively for the desktop compositor/window
 # manager, enforced at the OS scheduling level - not a request to any
 # individual library. Capping YOLO's own thread pool (torch/ncnn) helped
 # but didn't fully stop the screen freezing on the Pi, because MediaPipe's
@@ -30,12 +58,9 @@ import numpy as np
 # no num_threads) and runs on every single frame, not just every-Nth like
 # YOLO. CPU affinity sidesteps needing every library to cooperate: no
 # thread of this process, no matter which library spawned it, can ever be
-# scheduled onto a reserved core. Set before importing anything that
-# spins up its own thread pool (mediapipe/torch/ncnn below), though the
-# OS enforces this for the process's whole lifetime regardless of import
-# order. No-ops on Windows (sched_setaffinity is Linux-only) and on a
-# dev/CI machine with 2 or fewer cores, where reserving one wouldn't
-# leave enough for the app itself.
+# scheduled onto a reserved core. No-ops on macOS/Windows
+# (sched_setaffinity is Linux-only) and on a machine with 2 or fewer
+# cores, where reserving one wouldn't leave enough for the app itself.
 if hasattr(os, "sched_setaffinity"):
     _all_cpus = os.sched_getaffinity(0)
     if len(_all_cpus) > 2:
@@ -44,7 +69,15 @@ if hasattr(os, "sched_setaffinity"):
         print(f"[main] Reserved CPU core {_reserved_cpu} for the desktop session "
               f"(app restricted to {sorted(_all_cpus - {_reserved_cpu})})")
 
-from app import config, utils
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+# OpenCV's own worker pool: the per-frame colour conversions/CLAHE are
+# small, and a pool the size of the whole CPU just adds wake-ups and
+# contention with MediaPipe and YOLO for no real speed-up.
+cv2.setNumThreads(2)
+
+from app import utils  # noqa: E402
 from app.camera import Camera
 from app.face_detector import PresenceDetector
 from app.face_mesh import FaceMeshWrapper
@@ -52,7 +85,7 @@ from app.eye_tracker import EyeTracker
 from app.mouth_tracker import MouthTracker
 from app.drowsiness import DrowsinessDetector
 from app.head_pose import estimate_pose, HeadPoseTracker
-from app.yolo_detector import YoloDetector, DetectionConfirmer, YoloWorker
+from app.yolo_detector import YoloProcess
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
 
@@ -93,9 +126,7 @@ def main():
     mouth_tracker = MouthTracker()
     drowsiness = DrowsinessDetector()
     head_pose_tracker = HeadPoseTracker()
-    yolo = YoloDetector()
-    yolo_confirmer = DetectionConfirmer()
-    yolo_worker = YoloWorker(yolo, yolo_confirmer)
+    yolo = YoloProcess()   # own process - see yolo_detector.YoloProcess
     risk_engine = RiskEngine()
     alerts = AlertSystem()
 
@@ -124,9 +155,10 @@ def main():
     calibration_start = None
     calib_ear, calib_mar, calib_pitch, calib_yaw = [], [], [], []
 
-    prev_time = time.time()
+    prev_time = time.monotonic()
     last_console_log = 0.0
     last_csv_log = 0.0
+    last_yolo_submit = 0.0
     frame_count = 0
 
     # ---- Per-stage profiling (diagnostic: which stage actually owns the
@@ -164,6 +196,13 @@ def main():
     try:
         while True:
             t_loop_start = time.perf_counter()
+            frame_count += 1
+            # Drawing and the preview window only happen on frames that are
+            # actually shown (every DISPLAY_EVERY_N_FRAMES): overlays drawn on
+            # a frame nobody sees, and a waitKey() that blocks on the
+            # compositor (~24 ms measured on the Pi) on every frame, were pure
+            # waste on the skipped ones.
+            show = config.DISPLAY_ENABLED and frame_count % config.DISPLAY_EVERY_N_FRAMES == 0
             ret, frame = camera.read()
             if not ret:
                 print("Camera read failed - stopping.")
@@ -171,12 +210,23 @@ def main():
             t_camera = time.perf_counter()
 
             h, w = frame.shape[:2]
-            now = time.time()
+            # Monotonic, never wall-clock: every timer in the app (eye
+            # closure, head turn/lean, seatbelt, presence debounce) measures
+            # durations from this. The Pi's wall clock jumps when it syncs
+            # over the network after boot - hours forward on a Pi without a
+            # clock battery - which would make any timer running at that
+            # moment read "hours elapsed" and fire a false HIGH alert.
+            now = time.monotonic()
 
             # Obstruction/brightness are measured on the RAW frame first -
             # CLAHE enhancement below would artificially inflate the local
             # contrast of a covered lens and defeat the obstruction check.
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            # Measured on a 1/4-scale copy: mean/std-dev of a
+            # nearest-neighbour downsample match the full frame's, at ~1/16
+            # of the per-frame cost (np.std on the full 1280x720 frame
+            # converts ~0.9M pixels to float64 every frame).
+            gray = cv2.cvtColor(cv2.resize(frame, (w // 4, h // 4), interpolation=cv2.INTER_NEAREST),
+                                cv2.COLOR_BGR2GRAY)
             std_dev = utils.frame_std_dev(gray)
             brightness = utils.frame_mean_brightness(gray)
             # NOTE: CLAHE-enhanced frames also get fed to YOLO (not just
@@ -201,8 +251,6 @@ def main():
                 p, y_, _ = estimate_pose(landmarks, w, h)
                 if p is not None:
                     pitch, yaw = p, y_
-                if config.DISPLAY_ENABLED:
-                    face_mesh.draw(frame, drawable)
             t_mediapipe = time.perf_counter()
 
             # ---- Calibration phase ----
@@ -215,7 +263,7 @@ def main():
                     calib_pitch.append(pitch)
                     calib_yaw.append(yaw)
                     elapsed = now - calibration_start
-                    if config.DISPLAY_ENABLED:
+                    if show:
                         cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
                                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
@@ -229,7 +277,7 @@ def main():
                         calibrating = False
                         print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
-                elif config.DISPLAY_ENABLED:
+                elif show:
                     cv2.putText(frame, "Waiting for face to calibrate...",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -240,8 +288,9 @@ def main():
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
                 risk_last_t = None  # not classifying yet - see risk-rate block
 
-
-                if config.DISPLAY_ENABLED:
+                if show:
+                    if face_found:
+                        face_mesh.draw(frame, drawable)
                     cv2.imshow("DriverGuardian", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
@@ -277,11 +326,17 @@ def main():
                                              smoothed_mar, face_found=face_found)
             t_presence_logic = time.perf_counter()
 
-            frame_count += 1
-            if frame_count % config.YOLO_INFER_EVERY_N_FRAMES == 0:
+            # YOLO gets the frame BEFORE anything is drawn on it - the face
+            # mesh dots used to be drawn first, so YOLO was looking at 478
+            # green dots painted over the face and mouth, exactly where it
+            # looks for phones, drinks and cigarettes.
+            if time.monotonic() - last_yolo_submit >= config.YOLO_INTERVAL_SEC:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                yolo_worker.submit(frame, roi)
-            yolo_state = yolo_worker.get_latest()
+                if yolo.submit(frame, roi):
+                    last_yolo_submit = time.monotonic()
+            yolo_state = yolo.get_latest()
+            if show and face_found:
+                face_mesh.draw(frame, drawable)
             t_yolo = time.perf_counter()
 
             # ---- Draw YOLO bounding boxes ----
@@ -293,7 +348,7 @@ def main():
             # merely visible is not the same as one that actually triggered
             # a warning, and conflating them makes false-positive/negative
             # reports hard to diagnose.
-            if config.DISPLAY_ENABLED:
+            if show:
                 for x1, y1, x2, y2, label, conf, counted in yolo_state["raw_boxes"]:
                     x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
                     box_color = (0, 255, 0) if counted else (255, 255, 0)
@@ -326,7 +381,7 @@ def main():
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
-            if config.DISPLAY_ENABLED:
+            if show:
                 cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
 
@@ -377,10 +432,10 @@ def main():
                     cv2.putText(frame, m, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
                     y += 22
 
-            curr_time = time.time()
+            curr_time = time.monotonic()
             fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
             prev_time = curr_time
-            if config.DISPLAY_ENABLED:
+            if show:
                 cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
@@ -413,32 +468,36 @@ def main():
                 log_file.flush()
 
             t_risk_draw = time.perf_counter()
-            if config.DISPLAY_ENABLED:
-                if frame_count % config.DISPLAY_EVERY_N_FRAMES == 0:
-                    # Preview-only downscale - see config.DISPLAY_SCALE.
-                    # Everything downstream of detection already ran on the
-                    # full-resolution frame, so this costs no accuracy; it
-                    # only shrinks what the (software, no-OpenGL) Qt
-                    # renderer has to blit inside waitKey() below.
-                    if config.DISPLAY_SCALE != 1.0:
-                        preview = cv2.resize(frame, None, fx=config.DISPLAY_SCALE,
-                                             fy=config.DISPLAY_SCALE,
-                                             interpolation=cv2.INTER_NEAREST)
-                    else:
-                        preview = frame
-                    cv2.imshow("DriverGuardian", preview)
+            if show:
+                # Preview-only downscale - see config.DISPLAY_SCALE.
+                # Everything downstream of detection already ran on the
+                # full-resolution frame, so this costs no accuracy; it
+                # only shrinks what the (software, no-OpenGL) Qt
+                # renderer has to blit inside waitKey() below.
+                if config.DISPLAY_SCALE != 1.0:
+                    preview = cv2.resize(frame, None, fx=config.DISPLAY_SCALE,
+                                         fy=config.DISPLAY_SCALE,
+                                         interpolation=cv2.INTER_NEAREST)
+                else:
+                    preview = frame
+                cv2.imshow("DriverGuardian", preview)
                 # imshow() and waitKey() timed separately: the combined
                 # "display" stage was confirmed to spike to ~100ms roughly
                 # once a second (see [STUTTER]), but they fail for very
                 # different reasons - imshow() blocking points at frame
                 # data volume through this Qt build's software renderer (no
                 # OpenGL support), while waitKey() blocking points at the
-                # GUI event loop / compositor sync instead. Splitting them
-                # also explains why DISPLAY_EVERY_N_FRAMES=3 changed
-                # nothing earlier: that only gates imshow(), while
-                # waitKey() runs every frame regardless.
+                # GUI event loop / compositor sync instead. waitKey() used
+                # to run on every frame even when nothing new was shown,
+                # which is why DISPLAY_EVERY_N_FRAMES alone changed nothing
+                # earlier - both now only run on shown frames.
                 t_imshow = time.perf_counter()
                 key = cv2.waitKey(1) & 0xFF
+            elif config.DISPLAY_ENABLED:
+                # Frame not shown: skip the GUI entirely. Key presses queue up
+                # in the window and are read on the next shown frame.
+                key = 0xFF
+                t_imshow = time.perf_counter()
             else:
                 # No window, no keyboard input possible - quit via Ctrl+C
                 # (already works, propagates as KeyboardInterrupt through
@@ -539,6 +598,19 @@ def main():
                     else:
                         print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  no throttling")
 
+                # Whole-system picture on the same cadence: if the desktop
+                # lags while FPS looks fine, this shows whether the Pi is
+                # out of CPU (load), out of RAM (swapping to the SD card
+                # stalls everything, not just this app) or leaking threads.
+                sysinfo = utils.system_status()
+                if sysinfo:
+                    print(f"[SYSTEM] load={sysinfo['load1']:.2f} (cores={sysinfo['cores']}) "
+                          f"mem_available={sysinfo['mem_available_mb']:.0f}MB "
+                          f"swap_used={sysinfo['swap_used_mb']:.0f}MB "
+                          f"app_rss={sysinfo['rss_mb']:.0f}MB threads={sysinfo['threads']}"
+                          + ("  <- SWAPPING: out of RAM, expect system-wide lag"
+                             if sysinfo["swap_used_mb"] > 50 else ""))
+
             if key == ord('q'):
                 break
             elif key == ord('r'):
@@ -561,7 +633,7 @@ def main():
         cv2.destroyAllWindows()
         presence_detector.close()
         face_mesh.close()
-        yolo_worker.close()
+        yolo.close()
         log_file.close()
         if risk_log_file is not None:
             risk_log_file.close()

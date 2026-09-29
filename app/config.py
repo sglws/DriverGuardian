@@ -38,7 +38,12 @@ FACE_DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "blaze_face_short_range.tfli
 CAMERA_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
-TARGET_FPS_PREFERRED = 30
+TARGET_FPS_PREFERRED = 30   # USB webcams (they usually only offer 15/30)
+# Pi camera (picamera2) frame rate. The app is a 12+ Hz monitor; frames the
+# pipeline can't use were still captured and run through the ISP. 20 keeps
+# headroom above the requirement and leaves the rest of the CPU idle -
+# cooler Pi, smoother desktop. Raise it if the Pi has clear CPU headroom.
+CAMERA_FPS = 20
 
 # When False: skips all drawing (face mesh dots, YOLO boxes, text panel)
 # and the cv2.imshow()/waitKey() window entirely - camera, MediaPipe,
@@ -50,6 +55,9 @@ TARGET_FPS_PREFERRED = 30
 # freeze still happens with this False, it's not about the display.
 # No 'r' recalibration key when False (see main.py); quit via Ctrl+C.
 DISPLAY_ENABLED = True
+# CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
+# keeps the desktop, audio and Bluetooth responsive under full load.
+APP_NICE = 10
 # How many processed frames per actual cv2.imshow() call - 1 means every
 # frame (default, no behavior change). This app's Qt build has no OpenGL
 # support (confirmed via cv2.getBuildInformation()), so every displayed
@@ -63,7 +71,11 @@ DISPLAY_ENABLED = True
 # cv2.waitKey() still runs every frame regardless (see main.py) - it
 # processes GUI/keyboard events for the window, unrelated to whether a
 # new frame was actually pushed that iteration.
-DISPLAY_EVERY_N_FRAMES = 1
+# 2 = the preview window updates at half the processing rate (~7-9 FPS on
+# the Pi). Detection still runs on every frame; this halves the software
+# rendering work handed to the desktop compositor, which is shared with
+# everything else on screen.
+DISPLAY_EVERY_N_FRAMES = 2
 # Scale factor applied to the preview frame just before cv2.imshow() -
 # 1.0 means no resize. Detection is completely unaffected: everything
 # (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
@@ -214,10 +226,15 @@ PRE_DRIVE_CHECK_ENABLED = True
 # --------------------------------------------------------------------------
 # Presence / camera obstruction (Phase 2 + risk engine)
 # --------------------------------------------------------------------------
-NO_FACE_GRACE_SEC = 5.0            # no face detected for this long -> escalate (confirm-in)
+# Leaving the seat or covering the camera must change the state within 1 s.
+# Trade-off: a head turn far enough that no face is found at all (a long
+# over-the-shoulder look) also counts as "not detected" after 1 s.
+NO_FACE_GRACE_SEC = 0.9            # no face detected for this long -> escalate (confirm-in)
 PRESENCE_RECOVER_SEC = 0.5         # face reliably present for this long -> de-escalate (confirm-out)
 FRAME_STD_BLOCKED_THRESHOLD = 3.0  # grayscale std-dev below this -> covered lens / hand / object
-OBSTRUCTION_CONFIRM_SEC = 1.0      # low-variance must persist this long before flagging (confirm-in)
+# Shorter than NO_FACE_GRACE_SEC so a covered lens is reported as "camera
+# blocked" (the specific cause) rather than first as "driver not detected".
+OBSTRUCTION_CONFIRM_SEC = 0.5      # low-variance must persist this long before flagging (confirm-in)
 OBSTRUCTION_RECOVER_SEC = 0.5      # normal variance must persist this long to clear (confirm-out)
 
 # --------------------------------------------------------------------------
@@ -249,7 +266,22 @@ YOLO_CLASS_CONF_THRESHOLDS = {
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
-YOLO_INFER_EVERY_N_FRAMES = 6     # run YOLO on 1-in-5 frames; reuse last result otherwise
+# The camera frame is 16:9, but the square 640x640 model pads it with ~44%
+# grey bars that YOLO still has to process. The 384x640 export (same
+# weights, same detail - 640 px wide either way) does ~40% less work per
+# inference (measured 22.0 -> 13.1 ms). Off until checked on the Pi: run
+# once with each and compare the boxes/confidences on the overlay.
+# Re-create it with: python training/export.py --format ncnn --imgsz 384 640
+YOLO_USE_16X9_MODEL = False
+if YOLO_USE_16X9_MODEL:
+    YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_384x640_ncnn_model")
+    YOLO_IMG_SIZE = (384, 640)   # (height, width)
+# How often a frame is handed to YOLO (it runs in its own process - see
+# yolo_detector.YoloProcess). Time-based, so YOLO's CPU load no longer
+# grows when the main loop gets faster. 0.4 s ~ the old every-6th-frame
+# cadence at 15 FPS; with 2-of-3 confirmation a detection is confirmed in
+# roughly 0.8-1.0 s (the 1 s detection-delay requirement).
+YOLO_INTERVAL_SEC = 0.4
 # Uncapped, NCNN/torch grab every CPU core for the duration of each
 # inference call. On the Pi that starves the desktop session itself -
 # window manager, compositor, mouse cursor - of CPU time each time YOLO
@@ -329,7 +361,7 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
-CONSOLE_LOG_INTERVAL_SEC = 0.5
+CONSOLE_LOG_INTERVAL_SEC = 1.0
 CSV_LOG_INTERVAL_SEC = 1.0
 # Requirement check: "classification update rate of at least 0.2 Hz" means
 # no gap between two consecutive risk classifications may exceed 5 s.
@@ -377,16 +409,21 @@ ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
 ESP32_LINK_ENABLED = True
 ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
 ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
-# HIGH risk re-speaks its warning continuously (not just on change, unlike
-# LOW/MEDIUM) as a deliberate sustained audible alarm, rate-limited to
-# this cadence (see alerts.Voice - speech is non-blocking, and a repeat is
-# skipped while the previous one is still playing).
-HIGH_RISK_VOICE_REPEAT_SEC = 3.0
-# Spoken alerts via espeak-ng (Pi) / say (macOS), run as a separate
-# process so the video loop never waits on speech. False = print only
-# ([VOICE] lines still appear either way).
+# ---- Spoken alerts (app/voice.py - phrases and per-warning repeat
+# intervals live there, in PROMPTS) ----
 VOICE_ALERTS_ENABLED = True
-ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # don't hammer a failed connection attempt every frame
+VOICE_MIN_GAP_SEC = 2.0          # silence between any two prompts
+VOICE_CONFIRM_SEC = 0.5          # a warning must persist this long before it is spoken
+VOICE_CRITICAL_REPEAT_SEC = 4.0  # HIGH-risk prompt repeats while the danger lasts
+# Optional natural-sounding voice: path to a Piper .onnx voice model (needs
+# the `piper` command, e.g. pip install piper-tts). Empty = espeak-ng/say.
+VOICE_PIPER_MODEL = ""
+ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # wait after a failed connection attempt...
+ESP32_RECONNECT_MAX_COOLDOWN_SEC = 30.0  # ...doubling on each further failure, up to this
+# Each attempt ties up the Pi's Bluetooth radio for several seconds while it
+# pages the ESP32 - shared with a Bluetooth speaker (audio stutter) and,
+# on the Pi's combo chip, with Wi-Fi. Backing off keeps an ESP32 that is
+# switched off from degrading the rest of the system.
 ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing down + reconnecting
                                      # (a single slow send is often just a transient hiccup, not a
                                      # real disconnect - see Esp32Link.send() in alerts.py)

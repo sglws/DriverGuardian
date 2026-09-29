@@ -47,7 +47,7 @@ class FaceMeshWrapper:
 
     def _next_timestamp_ms(self) -> int:
         # VIDEO mode requires strictly increasing timestamps per call.
-        ts = max(self._last_ts_ms + 1, int(time.time() * 1000))
+        ts = max(self._last_ts_ms + 1, int(time.monotonic() * 1000))
         self._last_ts_ms = ts
         return ts
 

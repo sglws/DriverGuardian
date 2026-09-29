@@ -39,9 +39,11 @@ DriverGuardian/
 │   ├── eye_tracker.py     # Phase 4: EAR calculation
 │   ├── drowsiness.py      # Phase 5-6: blink + drowsiness rules
 │   ├── head_pose.py       # Phase 7: pitch/yaw/roll via solvePnP
-│   ├── yolo_detector.py   # Phase 8, 11: object detection
+│   ├── yolo_detector.py   # Phase 8, 11: object detection (runs in its own process)
+│   ├── yolo_service.py    # entry point of that YOLO process
 │   ├── risk_engine.py     # Phase 13: fuse everything into a risk level
-│   ├── alerts.py          # Phase 14: voice/TTS + ESP32 Bluetooth link
+│   ├── alerts.py          # Phase 14: routes risk to voice + ESP32 Bluetooth link
+│   ├── voice.py           # spoken alerts: phrases, chimes, pacing
 │   ├── config.py          # all thresholds and paths in one place
 │   └── utils.py
 ├── esp32/
@@ -112,6 +114,21 @@ python -c "from picamera2 import Picamera2; print('picamera2 OK')"
 
 If you're on a USB webcam instead, none of this is needed - `cv2.VideoCapture`
 already handles it.
+
+### Voice alerts (Pi)
+
+Spoken alerts use `espeak-ng` and play through the desktop's default audio
+output (a Bluetooth speaker works - pick it from the volume icon):
+
+```bash
+sudo apt install -y espeak-ng
+```
+
+Each alert is a short chime plus one fixed phrase (see `PROMPTS` in
+`app/voice.py`), rendered once into `assets/voice_cache/` on first start.
+For a more natural voice, install Piper (`pip install piper-tts`), download
+a voice model (`.onnx` + `.onnx.json`), and set `VOICE_PIPER_MODEL` in
+`app/config.py` to its path - the prompts re-render automatically.
 
 ## ESP32 (Bluetooth link to buzzer/vibration/LEDs/hazard relay)
 

@@ -26,13 +26,13 @@ one client at a time and the two would fight over that single slot.
 import errno
 import os
 import select
-import shutil
 import socket
 import subprocess
 import sys
 import time
 
 from app.risk_engine import Risk
+from app.voice import VoiceAlerts
 
 try:
     _BLUETOOTH_SOCKETS_AVAILABLE = hasattr(socket, "AF_BLUETOOTH") and hasattr(socket, "BTPROTO_RFCOMM")
@@ -48,70 +48,6 @@ if not _BLUETOOTH_SOCKETS_AVAILABLE:
           "means bluez/python3-dev support wasn't compiled in.)")
 
 from app import config
-
-
-class Voice:
-    """Spoken alerts that never block the video loop.
-
-    Speaks by launching the OS speech program (espeak-ng/espeak on the Pi,
-    `say` on macOS) with subprocess.Popen and NOT waiting for it - each
-    call returns in about a millisecond while the audio plays in its own
-    process. The previous pyttsx3 runAndWait() froze frame processing for
-    the full length of every sentence (1-3 s), and at HIGH risk - which
-    re-speaks every HIGH_RISK_VOICE_REPEAT_SEC - that stalled monitoring
-    for a large share of exactly the time it matters most, and would break
-    the <= 1 s classification-gap requirement on its own.
-
-    Deliberately NOT a thread, and the spawn happens on the main thread:
-    fork() from a background thread while Qt is loaded (cv2.imshow()) is
-    the proven root cause of this project's whole-system freeze (git
-    bisect) - see Esp32Link below for the same rule.
-
-    One utterance at a time: a new alert interrupts the one still playing
-    (the newest risk is the relevant one); a HIGH repeat is skipped while
-    the previous repeat is still being spoken rather than piling up.
-    """
-
-    def __init__(self):
-        self._cmd = None
-        for name, args in (("espeak-ng", ["-s", "165"]), ("espeak", ["-s", "165"]), ("say", [])):
-            path = shutil.which(name)
-            if path:
-                self._cmd = [path, *args]
-                break
-        self._proc = None
-        if config.VOICE_ALERTS_ENABLED and self._cmd is None:
-            print("[VOICE] No speech program found - alerts will only be printed. "
-                  "On the Pi: sudo apt install espeak-ng")
-
-    def busy(self) -> bool:
-        # poll() also reaps a finished process, so no zombies accumulate.
-        return self._proc is not None and self._proc.poll() is None
-
-    def say(self, text: str, interrupt: bool = True):
-        if not config.VOICE_ALERTS_ENABLED:
-            print(f"[VOICE] (disabled) {text}")
-            return
-        print(f"[VOICE] {text}")
-        if self._cmd is None:
-            return
-        if self.busy():
-            if not interrupt:
-                return
-            self._proc.kill()
-            self._proc.wait()   # already killed: returns immediately
-        try:
-            self._proc = subprocess.Popen(
-                [*self._cmd, text], stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-        except Exception as e:
-            print(f"[VOICE] speech failed: {e}")
-            self._proc = None
-
-    def close(self):
-        if self.busy():
-            self._proc.kill()
 
 
 class Esp32Link:
@@ -148,10 +84,17 @@ class Esp32Link:
     # confirmed to cut the RFCOMM handshake mid-negotiation, surfacing as
     # "[Errno 52] Invalid exchange").
     CONNECT_ABANDON_SEC = 20.0
+    # Sends never block (see _connected). If the link stays too congested to
+    # accept even one message for this long - the ESP32's own link-loss
+    # watchdog (BT_TIMEOUT_MS) - it's treated as dead and reconnected.
+    STALL_RECONNECT_SEC = 6.0
 
     def __init__(self):
         self._sock = None
         self._consecutive_send_failures = 0
+        self._connect_failures = 0
+        self._reported_down = False
+        self._stalled_since = None
         self._state = self.IDLE
         self._next_attempt_at = 0.0
         self._deadline = 0.0
@@ -205,15 +148,22 @@ class Esp32Link:
             self._fail(now, OSError(err, os.strerror(err)))
 
     def _connected(self, sock):
-        # Back to blocking with a timeout for the actual sends. 0.2 s was
-        # too aggressive for this link and a single slow send (the very first
-        # one after connecting) tore the connection down over a transient
-        # hiccup - see _consecutive_send_failures in send() for the rest.
-        sock.settimeout(2.0)
+        # Sends stay NON-blocking. A blocking send with a 2 s timeout could
+        # freeze the whole frame loop for up to 2 s whenever the radio was
+        # busy (e.g. streaming to a Bluetooth speaker). Now a congested link
+        # just drops that one heartbeat - the next follows ESP32_SEND_INTERVAL_SEC
+        # later - and only a stall longer than STALL_RECONNECT_SEC, or
+        # repeated real errors, count as a lost link (a single slow send
+        # tearing the connection down was a real problem earlier - see
+        # _consecutive_send_failures in send()).
+        sock.setblocking(False)
         self._sock = sock
         self._pending = None
         self._state = self.IDLE
         self._consecutive_send_failures = 0
+        self._connect_failures = 0
+        self._reported_down = False
+        self._stalled_since = None
         print(f"[ESP32] Connected to {config.ESP32_MAC_ADDRESS}")
 
     def _fail(self, now, reason):
@@ -227,9 +177,16 @@ class Esp32Link:
         # Cooldown measured from when the attempt ENDED, not when it began -
         # otherwise an attempt longer than the cooldown would immediately
         # trigger the next one (the cause of an earlier ~0.1 FPS regression).
-        self._next_attempt_at = now + config.ESP32_RECONNECT_COOLDOWN_SEC
+        # Doubles with each consecutive failure (5, 10, 20, 30 s...): every
+        # attempt occupies the Bluetooth radio while it pages the ESP32, so
+        # an ESP32 that is simply switched off must not keep the radio busy
+        # (Bluetooth speaker audio, and Wi-Fi on the Pi's shared chip).
+        self._connect_failures += 1
+        cooldown = min(config.ESP32_RECONNECT_COOLDOWN_SEC * 2 ** (self._connect_failures - 1),
+                       config.ESP32_RECONNECT_MAX_COOLDOWN_SEC)
+        self._next_attempt_at = now + cooldown
         print(f"[ESP32] Could not connect to {config.ESP32_MAC_ADDRESS}: {reason} "
-              f"(will retry in {config.ESP32_RECONNECT_COOLDOWN_SEC:.0f}s)")
+              f"(will retry in {cooldown:.0f}s)")
 
     def _advance(self, now):
         """Move the reconnect state machine forward by at most one step.
@@ -287,11 +244,29 @@ class Esp32Link:
         line = f"{risk_name},{case}\n"
         sock = self._ensure_open()
         if sock is None:
-            print(f"[ESP32 -> ] (not connected) {line.strip()}")
+            # Said once per outage, not on every heartbeat (was ~3 lines/s).
+            if not self._reported_down:
+                self._reported_down = True
+                print("[ESP32] Not connected - reconnecting in the background; "
+                      "monitoring and voice alerts continue on the Pi")
             return
         try:
             sock.send(line.encode("ascii", errors="replace"))
             self._consecutive_send_failures = 0
+            self._stalled_since = None
+        except BlockingIOError:
+            # Link momentarily congested: drop this heartbeat, never wait.
+            now = time.monotonic()
+            if self._stalled_since is None:
+                self._stalled_since = now
+            elif now - self._stalled_since >= self.STALL_RECONNECT_SEC:
+                print(f"[ESP32] Link stalled for {self.STALL_RECONNECT_SEC:.0f}s, reconnecting")
+                try:
+                    sock.close()
+                except Exception:
+                    pass
+                self._sock = None
+                self._stalled_since = None
         except Exception as e:
             self._consecutive_send_failures += 1
             # A single slow/dropped send on a Bluetooth Classic link is
@@ -317,44 +292,26 @@ class Esp32Link:
 
 
 class AlertSystem:
-    """Tracks last-fired risk tier so voice/dashboard don't spam every
-    frame, and rate-limits the ESP32 link to ESP32_SEND_INTERVAL_SEC
-    (its own heartbeat cadence - see Esp32Link/esp32/ sketch docstrings).
+    """Routes each frame's risk decision to its outputs: spoken alerts
+    (app/voice.py - paced so it stays calm) and the ESP32 over Bluetooth,
+    rate-limited to ESP32_SEND_INTERVAL_SEC (its heartbeat cadence - see
+    Esp32Link and the esp32/ sketch).
     """
 
     def __init__(self):
         self._last_risk = None
-        self._last_high_speak = 0.0
         self._last_esp32_send = 0.0
         self._esp32 = Esp32Link()
-        self._voice = Voice()
+        self._voice = VoiceAlerts()
 
     def dispatch(self, risk: Risk, messages: list[str], case: str = "NONE"):
-        now = time.time()
+        now = time.monotonic()   # never wall-clock: see main.py
 
-        # Only re-fire voice/dashboard alerts on a risk-tier change to avoid
-        # spamming the driver every single frame at 20-30 FPS.
-        changed = risk != self._last_risk
+        if risk == Risk.HIGH and self._last_risk != Risk.HIGH:
+            print("[DASHBOARD] HIGH RISK ALERT -", " / ".join(messages))
         self._last_risk = risk
 
-        if risk == Risk.LOW:
-            if changed:
-                self._voice.say(messages[0] if messages else "Please stay focused.")
-        elif risk == Risk.MEDIUM:
-            if changed:
-                self._voice.say(messages[0] if messages else "Warning: please pay attention.")
-        elif risk == Risk.HIGH:
-            # Deliberately NOT gated by `changed` alone like LOW/MEDIUM -
-            # HIGH re-speaks continuously as a sustained alarm for as long
-            # as the danger persists, rate-limited to HIGH_RISK_VOICE_REPEAT_SEC.
-            # A repeat never cuts off the previous one mid-sentence
-            # (interrupt=False); a fresh escalation to HIGH does.
-            if changed or now - self._last_high_speak >= config.HIGH_RISK_VOICE_REPEAT_SEC:
-                self._last_high_speak = now
-                self._voice.say(messages[0] if messages else "Warning. Please respond immediately.",
-                                interrupt=changed)
-            if changed:
-                print("[DASHBOARD] HIGH RISK ALERT -", " / ".join(messages))
+        self._voice.update(risk, case, now)
 
         # The ESP32 gets every risk tier, including SAFE - it needs the
         # continuous stream to tell "still SAFE" apart from "link down".

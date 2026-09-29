@@ -63,7 +63,7 @@ class RiskEngine:
                  drowsiness_state: dict, head_pose_state: dict,
                  yolo_state: dict, seatbelt_supported: bool = True):
         """
-        Returns (Risk, list[str] action_messages, dict debug_info).
+        Returns (Risk, list[str] status_messages, dict debug_info).
 
         debug_info["case"] is a single short reason code identifying WHICH
         condition is primarily responsible for the current risk (e.g.
@@ -93,7 +93,7 @@ class RiskEngine:
             # to wait on - treating it as fine would let the check pass by
             # simply never seeing a belt at all.
             if seatbelt_supported and yolo_state.get("seatbelt_off") is not False:
-                return Risk.WAITING, ["Waiting for seatbelt - monitoring not started"], {"case": "PRE_DRIVE"}
+                return Risk.WAITING, ["Waiting for seatbelt"], {"case": "PRE_DRIVE"}
             self.pre_drive_passed = True
             # Names only what was actually verified - claiming a fastened belt
             # while the belt check was skipped would be worse than silence.
@@ -103,23 +103,20 @@ class RiskEngine:
 
         # ---- Instant HIGH overrides ----
         if presence == PresenceState.CAMERA_BLOCKED:
-            return Risk.HIGH, ["Camera obstruction detected", "Hazard lights", "Autonomous stop"], {"case": "BLOCKED"}
+            return Risk.HIGH, ["Camera blocked - stopping vehicle"], {"case": "BLOCKED"}
 
         if presence == PresenceState.DRIVER_ABSENT:
-            return Risk.HIGH, ["Driver not detected in seat", "Hazard lights", "Autonomous stop"], {"case": "ABSENT"}
+            return Risk.HIGH, ["Driver not in seat - stopping vehicle"], {"case": "ABSENT"}
 
         if drowsiness_state["level"] == DrowsinessLevel.SLEEPING:
-            return Risk.HIGH, [
-                "Driver asleep detected", "Seat vibration ON", "Hazard lights ON",
-                "ESP32 taking control", "Reduce speed gradually", "Stop vehicle",
-            ], {"case": "SLEEP"}
+            return Risk.HIGH, ["Driver asleep - stopping vehicle"], {"case": "SLEEP"}
 
         # ---- Head-lean sustained recheck (Case 2 escalation) ----
         # Uses the debounced lean_confirmed signal, not the raw per-frame
         # is_leaning, so a single noisy pitch reading can't fire this.
         if head_pose_state["lean_case_active"] and head_pose_state["lean_recheck_due"]:
             if head_pose_state["lean_confirmed"]:
-                return Risk.HIGH, ["Prolonged head lean - behavior did not improve", "Autonomous stop"], {"case": "LEAN_PROLONGED"}
+                return Risk.HIGH, ["Prolonged head lean - stopping vehicle"], {"case": "LEAN_PROLONGED"}
 
         # ---- Head-turn sustained escalation (Case 3, tiered) ----
         # turn_risk is a dedicated, dwell-time-gated state machine (see
@@ -129,7 +126,7 @@ class RiskEngine:
         # LOW/MEDIUM are applied as score floors further down so they can
         # still combine with other simultaneous risk factors.
         if head_pose_state["turn_risk"] == "HIGH":
-            return Risk.HIGH, ["Prolonged head turn away from the road", "Autonomous stop"], {"case": "TURN_PROLONGED"}
+            return Risk.HIGH, ["Prolonged look-away - stopping vehicle"], {"case": "TURN_PROLONGED"}
 
         # ---- Scored combination of lesser conditions ----
         score = 0
@@ -140,7 +137,7 @@ class RiskEngine:
 
         if drowsiness_state["level"] == DrowsinessLevel.DROWSY:
             score += 2
-            messages.append("Voice warning + Seat vibration + Reduce speed 50%")
+            messages.append("Eyes closing")
             case_candidates.append((1, "MICROSLEEP"))
 
         # Case 2 (head resting on hand / leaning): MEDIUM the moment leaning
@@ -149,16 +146,16 @@ class RiskEngine:
         # this to HIGH if it's still unresolved 5s later.
         if head_pose_state["lean_confirmed"] and drowsiness_state["level"] != DrowsinessLevel.DROWSY:
             score += 2
-            messages.append("Voice warning + Seat vibration + Reduce speed 50% (head leaning)")
+            messages.append("Head leaning")
             case_candidates.append((2, "LEAN"))
 
         if head_pose_state["turn_risk"] == "MEDIUM":
             score += config.SCORE_MEDIUM_MIN
-            messages.append(f'Audio: "Please focus on the road ahead." (head {head_pose_state["yaw_label"]} - prolonged)')
+            messages.append(f'Looking away ({head_pose_state["yaw_label"].lower()}, prolonged)')
             case_candidates.append((3, "TURN"))
         elif head_pose_state["turn_risk"] == "LOW":
             score += config.SCORE_LOW_MIN
-            messages.append(f'Audio: "Please focus on the road ahead." (head {head_pose_state["yaw_label"]})')
+            messages.append(f'Looking away ({head_pose_state["yaw_label"].lower()})')
             case_candidates.append((3, "TURN"))
 
         if yolo_state.get("seatbelt_off") is True:
@@ -167,9 +164,9 @@ class RiskEngine:
             elapsed = now - self.seatbelt_missing_since
             score += 2
             if elapsed >= config.SEATBELT_UNWORN_ESCALATE_SEC:
-                messages.append("Seatbelt unworn >10s -> Reduce speed 30%")
+                messages.append(f"Seatbelt off > {config.SEATBELT_UNWORN_ESCALATE_SEC:.0f}s")
             else:
-                messages.append("Audio warning + Seat vibration (seatbelt)")
+                messages.append("Seatbelt off")
             case_candidates.append((4, "SEATBELT"))
         else:
             self.seatbelt_missing_since = None
@@ -181,14 +178,14 @@ class RiskEngine:
                 self.phone_hits += 1
                 if self.phone_hits >= config.PHONE_REPEAT_TRIGGER:
                     score += 1
-                    messages.append("Repeated phone use -> Reduce speed 30% + Seat vibration + Hazard lights")
+                    messages.append("Repeated phone use")
                     self.phone_hits = 0
                     case_candidates.append((5, "PHONE_REPEAT"))
                 else:
-                    messages.append('Audio: "Don\'t text and drive."')
+                    messages.append("Phone in use")
                     case_candidates.append((5, "PHONE"))
             else:
-                messages.append("Phone still in view")
+                messages.append("Phone in use")
                 case_candidates.append((5, "PHONE"))
         self.phone_prev_active = phone_active
 
@@ -199,14 +196,14 @@ class RiskEngine:
                 self.consumption_hits += 1
                 if self.consumption_hits >= config.CONSUMPTION_REPEAT_TRIGGER:
                     score += 1
-                    messages.append("Repeated eating/drinking/smoking -> elevated risk")
+                    messages.append("Repeated eating/drinking/smoking")
                     self.consumption_hits = 0
                     case_candidates.append((6, "CONSUMPTION_REPEAT"))
                 else:
-                    messages.append('Audio: "Please focus on driving."')
+                    messages.append("Eating/drinking/smoking")
                     case_candidates.append((6, "CONSUMPTION"))
             else:
-                messages.append("Consumption still in view")
+                messages.append("Eating/drinking/smoking")
                 case_candidates.append((6, "CONSUMPTION"))
         self.consumption_prev_active = consumption_active
 
@@ -217,7 +214,7 @@ class RiskEngine:
         # further, same as everything else in this scored section.
         if drowsiness_state["is_yawning"] or drowsiness_state["yawn_rate"] >= config.YAWN_RATE_DROWSY_THRESHOLD:
             score += config.SCORE_LOW_MIN
-            messages.append('Audio: "You look tired - consider taking a break."')
+            messages.append("Yawning - signs of fatigue")
             case_candidates.append((7, "YAWN"))
 
         # ---- Map combined score to a risk tier ----

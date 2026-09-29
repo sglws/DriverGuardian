@@ -25,12 +25,18 @@ try:
 except ImportError:
     _PICAMERA2_AVAILABLE = False
 
+try:
+    from libcamera import Transform
+except ImportError:
+    Transform = None
+
 
 class Camera:
     def __init__(self, index=config.CAMERA_INDEX,
                  width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT):
         self.using_picamera2 = _PICAMERA2_AVAILABLE
 
+        self._flip_in_software = True
         if self.using_picamera2:
             self.picam2 = Picamera2()
             # NOTE: picamera2's "RGB888" format is a legacy/misleading name -
@@ -53,13 +59,26 @@ class Camera:
             # issue like everything else already ruled out for that same
             # symptom. 4 trades a little of the latency fix back for a
             # deeper cushion against underrun-triggered restarts.
+            # Mirroring is done by the camera's ISP (Transform(hflip)) at no
+            # CPU cost, instead of cv2.flip() copying every full frame.
+            # FrameRate is capped at what the app can actually process: the
+            # sensor/ISP no longer produce frames that are only thrown away,
+            # and in a dim cabin the longer allowed exposure gives a
+            # brighter image (less need for CLAHE enhancement).
+            extra = {}
+            if Transform is not None:
+                extra["transform"] = Transform(hflip=1)
+                self._flip_in_software = False
             video_config = self.picam2.create_video_configuration(
                 main={"size": (width, height), "format": "RGB888"},
                 buffer_count=4,
+                controls={"FrameRate": config.CAMERA_FPS},
+                **extra,
             )
             self.picam2.configure(video_config)
             self.picam2.start()
-            print(f"[camera] Using picamera2 (libcamera) at {width}x{height}")
+            print(f"[camera] Using picamera2 (libcamera) at {width}x{height}, "
+                  f"{config.CAMERA_FPS} fps, mirror in {'software' if self._flip_in_software else 'hardware'}")
         else:
             # No backend given, cv2.VideoCapture() defaults to whatever
             # OpenCV auto-picks - on Windows that's usually MSMF, which is
@@ -115,7 +134,8 @@ class Camera:
         """Returns (success, mirrored_bgr_frame)."""
         if self.using_picamera2:
             frame = self.picam2.capture_array()
-            frame = cv2.flip(frame, 1)  # mirror for natural selfie-view
+            if self._flip_in_software:
+                frame = cv2.flip(frame, 1)  # mirror for natural selfie-view
             return True, frame
 
         ret, frame = self.cap.read()
