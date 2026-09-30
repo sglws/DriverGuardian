@@ -1,9 +1,10 @@
 """Verify the risk-classification update-rate requirement from a session log.
 
 Requirement: "The system shall ... compute a driver risk level with a
-classification update rate of at least 0.2 Hz (Low, Medium, High)."
+classification update rate of at least 12 Hz on average, with no gap between
+updates exceeding 1 s (Low, Medium, High)."
 
-0.2 Hz means a new classification at least every 1 / 0.2 = 5 s. The worst
+The gap limit means a new classification at least every 1 s. The worst
 case is what matters, so this checks the LONGEST gap between consecutive
 classifications, not just the average rate.
 
@@ -12,7 +13,7 @@ config.RISK_UPDATE_LOG = True (logs/risk_updates_<session>.csv, columns
 t_monotonic, risk, case). With no argument the newest such log is used.
 
 Usage:
-    python tools/check_update_rate.py [path/to/risk_updates_*.csv] [--min-hz 0.2]
+    python tools/check_update_rate.py [path/to/risk_updates_*.csv] [--min-hz 1]
 """
 import argparse
 import csv
@@ -32,7 +33,8 @@ def percentile(sorted_vals, p):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("path", nargs="?", help="risk_updates_*.csv (default: newest in logs/)")
-    ap.add_argument("--min-hz", type=float, default=0.2, help="required minimum rate (default 0.2)")
+    ap.add_argument("--min-hz", type=float, default=1.0,
+                    help="worst-case rate: max gap = 1/this (default 1 -> 1 s)")
     args = ap.parse_args()
 
     path = args.path

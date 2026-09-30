@@ -240,6 +240,14 @@ class Esp32Link:
         self._advance(time.monotonic())
         return self._sock
 
+    @property
+    def status(self) -> str:
+        if not config.ESP32_LINK_ENABLED:
+            return "disabled"
+        if not _BLUETOOTH_SOCKETS_AVAILABLE:
+            return "unsupported"
+        return "connected" if self._sock is not None else "searching"
+
     def send(self, risk_name: str, case: str):
         line = f"{risk_name},{case}\n"
         sock = self._ensure_open()
@@ -318,6 +326,17 @@ class AlertSystem:
         if now - self._last_esp32_send >= config.ESP32_SEND_INTERVAL_SEC:
             self._last_esp32_send = now
             self._esp32.send(risk.name, case)
+
+    def health(self, now: float) -> dict:
+        """Link/voice status for the dashboard."""
+        v = self._voice
+        return {
+            "esp32": self._esp32.status,
+            "voice": v.status,
+            "voice_last": v.last_text,
+            "voice_seq": v.seq,
+            "voice_last_age": (now - v.last_at) if v.last_at is not None else None,
+        }
 
     def close(self):
         self._voice.close()

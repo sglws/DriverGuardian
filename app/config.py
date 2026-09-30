@@ -72,6 +72,9 @@ WEB_VIEW_PORT = 8080
 WEB_VIEW_FPS = 10               # stream frame rate (detection still runs at full rate)
 WEB_VIEW_WIDTH = 1280           # stream width in pixels; 1280 = full camera resolution
 WEB_VIEW_JPEG_QUALITY = 80      # ~5 Mbit/s at 1280 px / 10 fps; lower both for a weak network
+WEB_STATUS_INTERVAL_SEC = 0.2   # how often the main loop hands the dashboard a fresh state
+WEB_HISTORY_INTERVAL_SEC = 0.25 # chart sample spacing (4 per second)
+WEB_HISTORY_SEC = 600           # chart history kept in memory (10 minutes)
 
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
@@ -384,12 +387,14 @@ SCORE_HIGH_MIN = 4
 CONSOLE_LOG_ENABLED = True
 CONSOLE_LOG_INTERVAL_SEC = 1.0
 CSV_LOG_INTERVAL_SEC = 1.0
-# Requirement check: "classification update rate of at least 0.2 Hz" means
-# no gap between two consecutive risk classifications may exceed 5 s.
-# main.py prints a [RISK-RATE] line on the [PROFILE] cadence with the rate
-# and the LONGEST gap (the worst case is what the requirement is about - an
-# average of 15 Hz still fails if one frame stalls for 6 s).
-RISK_UPDATE_MIN_HZ = 0.2
+# Requirement (Requirements spec, updated to the measured system): the risk
+# classification updates at an average of at least 12 Hz, with no gap
+# between two consecutive classifications longer than 1 s. main.py prints a
+# [RISK-RATE] line on the [PROFILE] cadence with the rate and the LONGEST
+# gap (the worst case matters - a 15 Hz average still fails if one frame
+# stalls for 2 s); the dashboard shows both as pass/fail.
+RISK_UPDATE_MIN_AVG_HZ = 12.0
+RISK_UPDATE_MIN_HZ = 1.0        # worst case: max gap = 1 / this = 1 s
 # When True, every single classification's monotonic timestamp is written
 # to logs/risk_updates_<session>.csv for offline verification with
 # tools/check_update_rate.py. Off by default: one row per frame is ~15

@@ -41,7 +41,8 @@ DriverGuardian/
 │   ├── head_pose.py       # Phase 7: pitch/yaw/roll via solvePnP
 │   ├── yolo_detector.py   # Phase 8, 11: object detection (runs in its own process)
 │   ├── yolo_service.py    # entry point of that YOLO process
-│   ├── web_view.py        # live view in a browser (http://<pi>.local:8080)
+│   ├── web_view.py        # monitoring dashboard server (http://<pi>.local:8080)
+│   ├── web/               # dashboard page: index.html, style.css, app.js
 │   ├── risk_engine.py     # Phase 13: fuse everything into a risk level
 │   ├── alerts.py          # Phase 14: routes risk to voice + ESP32 Bluetooth link
 │   ├── voice.py           # spoken alerts: phrases, chimes, pacing
@@ -225,9 +226,23 @@ The app serves its own live view. On any device on the same network open:
 http://pi5.local:8080        (use your Pi's hostname, or the IP printed at startup)
 ```
 
-It shows the annotated camera image, the current risk level, case and FPS, and a
-**Recalibrate** button. Several people can watch at once, and frames are only
-encoded while someone is watching.
+The monitoring dashboard shows:
+
+- the live camera view (face mesh + object detections), full-screen capable
+- the current risk level and reason, and how long it has lasted
+- live driver signals: eyes, blinks, mouth/yawning, head direction, phone,
+  eating/drinking, smoking, seatbelt, driver presence and lighting
+- trends for the last 1/5/10 minutes: risk timeline, eye openness (EAR),
+  mouth opening (MAR) and head pose - hover or use the arrow keys to read
+  values, or switch any chart to a table
+- requirement checks (update rate >= 12 Hz, longest gap <= 1 s), time per
+  frame, CPU temperature/throttling, load and memory, YOLO / ESP32 / voice status
+- session summary (time at each risk level, alerts by type) and an event log
+  (risk changes, spoken alerts, detections, link changes)
+- **Recalibrate** and **Snapshot** buttons, light/dark theme
+
+Several people can watch at once; video is only encoded while someone is watching.
+Everything is served by the app itself - no internet connection needed.
 
 **Don't watch the app through remote-desktop screen sharing** (Raspberry Pi
 Connect's screen sharing, VNC). The Pi 5 has no hardware video encoder, so it

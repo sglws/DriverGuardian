@@ -173,6 +173,7 @@ class VoiceAlerts:
         self._ended_at = -1e9
         self._last_start = {}     # (case, critical) -> monotonic time
         self._candidate, self._candidate_since = None, 0.0
+        self.last_text, self.last_at, self.seq = None, None, 0   # last prompt (for the dashboard)
         if not config.VOICE_ALERTS_ENABLED:
             print("[VOICE] disabled (VOICE_ALERTS_ENABLED = False)")
             return
@@ -258,10 +259,17 @@ class VoiceAlerts:
             return
 
         print(f"[VOICE] {PROMPTS[case][0]}")
+        self.last_text, self.last_at, self.seq = PROMPTS[case][0], now, self.seq + 1
         if key in self._files:
             self._play(key, critical, now)
         else:
             self._last_start[key] = now   # printed only (voice disabled or unavailable)
+
+    @property
+    def status(self) -> str:
+        if not config.VOICE_ALERTS_ENABLED:
+            return "off"
+        return "on" if self._files else "unavailable"
 
     def close(self):
         if self._proc is not None and self._proc.poll() is None:

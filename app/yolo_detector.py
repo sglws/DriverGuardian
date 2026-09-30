@@ -391,6 +391,7 @@ class YoloProcess:
         self._conn = self._proc = None
         self._busy = False
         self._restart_at = 0.0
+        self._last_result_at = None
         self._fallback = None
         if self.available and sys.platform == "win32":
             self._fallback = YoloWorker(YoloDetector(), DetectionConfirmer())
@@ -441,6 +442,7 @@ class YoloProcess:
                 else:
                     self._latest = msg
                     self._busy = False
+                    self._last_result_at = time.monotonic()
         except (EOFError, OSError):
             self._died()
 
@@ -464,6 +466,21 @@ class YoloProcess:
             return False
         self._busy = True
         return True
+
+    def health(self, now: float) -> dict:
+        """Process status for the dashboard."""
+        if not self.available:
+            state = "disabled"
+        elif self._fallback is not None:
+            state = "running"
+        elif self._conn is None:
+            state = "restarting"
+        elif self._last_result_at is None:
+            state = "starting"
+        else:
+            state = "running"
+        age = now - self._last_result_at if self._last_result_at is not None else None
+        return {"state": state, "result_age": age}
 
     def get_latest(self) -> dict:
         if self._fallback is not None:

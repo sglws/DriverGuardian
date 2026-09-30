@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DriverGuardian Monitor</title>
+  <meta name="description" content="Live driver monitoring dashboard">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Crect width='24' height='24' rx='6' fill='%230b0b0b'/%3E%3Cpath d='M12 5 6 7.5v4.3c0 3.4 2.5 6 6 7.2 3.5-1.2 6-3.8 6-7.2V7.5z' fill='none' stroke='white' stroke-width='1.8'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <div class="logo" aria-hidden="true">
+      <svg viewBox="0 0 24 24" class="i"><path d="M12 3 5 6v5c0 4.4 3 8.2 7 9.5 4-1.3 7-5.1 7-9.5V6z"/><circle cx="12" cy="11" r="2.4"/></svg>
+    </div>
+    <div><b>DriverGuardian</b><span>Driver monitoring</span></div>
+  </div>
+  <span class="conn" id="conn" role="status"><span class="dot"></span><span id="conn-text">Connecting…</span></span>
+  <span class="meta" id="uptime" title="Session duration"></span>
+  <div class="actions">
+    <button id="btn-recal" class="primary" title="Recalibrate the driver's baseline (3 s, looking straight ahead)">
+      <svg class="i" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg><span>Recalibrate</span>
+    </button>
+    <a class="btn" id="btn-snap" href="/snapshot.jpg" download title="Download the current frame">
+      <svg class="i" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg><span>Snapshot</span>
+    </a>
+    <button id="btn-theme" title="Theme: follows the system" aria-label="Toggle light / dark theme">
+      <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
+    </button>
+  </div>
+</header>
+
+<main class="wrap" id="app">
+  <!-- live view + current state -->
+  <div class="top">
+    <div class="main-col">
+      <div class="video" id="video-box">
+        <img id="video" alt="Live camera view with face mesh and object detections">
+        <div class="waiting" id="video-wait">Waiting for video…</div>
+        <div class="badge"><span class="pill"><span class="rec"></span>LIVE</span><span class="pill" id="video-fps"></span></div>
+        <div class="tools">
+          <button id="btn-full" title="Full screen" aria-label="Full screen">
+            <svg class="i" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+          </button>
+        </div>
+        <div class="calib" id="calib" hidden>
+          <div class="txt">Calibrating — look straight at the camera, eyes open, mouth closed</div>
+          <div class="bar"><i id="calib-bar" style="width:0"></i></div>
+        </div>
+      </div>
+      <div class="card dim-when-stale">
+        <div class="card-h"><h2>Driver &amp; cabin</h2><span class="sub">live</span></div>
+        <div class="card-b"><div class="chips" id="chips"></div></div>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="card hero dim-when-stale" id="hero" aria-live="polite">
+        <div class="row">
+          <div class="icon" id="hero-icon"></div>
+          <div>
+            <div class="label">Risk level</div>
+            <div class="level" id="hero-level">—</div>
+          </div>
+        </div>
+        <div class="case" id="hero-case"></div>
+        <div class="msg" id="hero-msg"></div>
+        <div class="facts">
+          <span>for <b id="hero-for">—</b></span>
+          <span>score <b id="hero-score">—</b></span>
+          <span>updates <b id="hero-rate">—</b></span>
+        </div>
+      </div>
+      <div class="card events-card">
+        <div class="card-h">
+          <h2>Event log</h2><span class="sub" id="ev-count"></span>
+        </div>
+        <div class="filters" id="ev-filters" role="group" aria-label="Filter events">
+          <button data-kind="all" aria-pressed="true">All</button>
+          <button data-kind="risk" aria-pressed="false">Risk</button>
+          <button data-kind="voice" aria-pressed="false">Voice</button>
+          <button data-kind="detect" aria-pressed="false">Detection</button>
+          <button data-kind="system" aria-pressed="false">System</button>
+        </div>
+        <div class="events" id="events"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- trends -->
+  <section class="dim-when-stale">
+    <div class="toolbar">
+      <h2>Trends</h2>
+      <div class="seg" role="group" aria-label="Time range" id="range">
+        <button data-sec="60" aria-pressed="false">1 min</button>
+        <button data-sec="300" aria-pressed="true">5 min</button>
+        <button data-sec="600" aria-pressed="false">10 min</button>
+      </div>
+    </div>
+    <div class="charts">
+      <div class="card wide" id="c-risk"></div>
+      <div class="card" id="c-ear"></div>
+      <div class="card" id="c-mar"></div>
+      <div class="card" id="c-head"></div>
+    </div>
+  </section>
+
+  <!-- requirements / system / session -->
+  <section class="panels dim-when-stale">
+    <div class="card">
+      <div class="card-h"><h2>Requirements &amp; performance</h2></div>
+      <div class="card-b" id="p-req"></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>System health</h2></div>
+      <div class="card-b" id="p-sys"></div>
+    </div>
+    <div class="card">
+      <div class="card-h"><h2>Session</h2><span class="sub" id="session-start"></span></div>
+      <div class="card-b" id="p-session"></div>
+    </div>
+  </section>
+
+  <footer>DriverGuardian · served by the monitoring app on this device · data stays on your network</footer>
+</main>
+
+<div class="tip" id="tip" role="tooltip"></div>
+<script src="/static/app.js"></script>
+</body>
+</html>

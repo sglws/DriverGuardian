@@ -99,6 +99,57 @@ RISK_COLORS = {
 }
 
 
+def _r(x, nd=3):
+    return None if x is None else round(float(x), nd)
+
+
+def dashboard_state(*, risk, debug, messages, presence, face_found, drowsy_state, drowsiness,
+                    ear, mar, pose_state, yolo_state, yolo, std_dev, brightness,
+                    perf, thermal, sysinfo, links, baseline, calibrating=False, calib_progress=None):
+    """Everything the web dashboard shows, as plain JSON-able values."""
+    seatbelt_off = yolo_state.get("seatbelt_off")
+    return {
+        "risk": risk.name, "case": debug.get("case", "NONE"), "score": debug.get("score"),
+        "messages": list(messages[:4]), "presence": presence.name if presence else None,
+        "face_found": face_found, "calibrating": calibrating, "calib_progress": calib_progress,
+        "baseline": baseline,
+        "eyes": None if drowsy_state is None else {
+            "closed": drowsy_state["eye_closed"], "ear": _r(ear), "ear_thr": _r(drowsiness.closed_threshold),
+            "closed_sec": _r(drowsy_state["closed_elapsed"], 2), "blink_rate": drowsy_state["blink_rate"],
+            "blink_window_sec": config.BLINK_WINDOW_SEC, "blinks_total": drowsy_state["total_blinks"],
+            "level": drowsy_state["level"].name, "looking_down": drowsy_state["looking_down"],
+        },
+        "mouth": None if drowsy_state is None else {
+            "open": drowsy_state["mouth_open"], "mar": _r(mar), "mar_thr": _r(drowsiness.open_mouth_threshold),
+            "open_sec": _r(drowsy_state["open_elapsed"], 2), "yawning": drowsy_state["is_yawning"],
+            "yawns_window": drowsy_state["yawn_rate"], "yawns_total": drowsy_state["total_yawns"],
+        },
+        "head": None if pose_state is None else {
+            "pitch": _r(pose_state["pitch_delta"], 1), "yaw": _r(pose_state["yaw_delta"], 1),
+            "pitch_label": pose_state["pitch_label"], "yaw_label": pose_state["yaw_label"],
+            "yaw_zone": pose_state["yaw_zone"], "turn_sec": _r(pose_state["turn_elapsed"], 1),
+            "lean_sec": _r(pose_state["lean_elapsed"], 1), "turn_risk": pose_state["turn_risk"],
+        },
+        "objects": {
+            "phone": yolo_state.get("phone"), "consumption": yolo_state.get("consumption"),
+            "cigarette": yolo_state.get("cigarette"),
+            "seatbelt": utils.seatbelt_label(seatbelt_off) if yolo.using_finetuned else "N/A",
+            "boxes": [{"label": b[4], "conf": _r(b[5], 2), "counted": b[6]} for b in yolo_state.get("raw_boxes", [])],
+        },
+        "camera": {"brightness": _r(brightness, 0), "std_dev": _r(std_dev, 1),
+                   "low_light": brightness is not None and brightness < config.LOW_LIGHT_BRIGHTNESS_THRESHOLD},
+        "perf": perf,
+        "system": None if not thermal and not sysinfo else {
+            "temp_c": _r(thermal.get("temp_c"), 1) if thermal else None,
+            "throttled": thermal.get("flags", []) if thermal else [],
+            **({k: _r(v, 2) for k, v in sysinfo.items()} if sysinfo else {}),
+        },
+        "links": links,
+        "requirements": {"min_avg_rate_hz": config.RISK_UPDATE_MIN_AVG_HZ,
+                         "max_gap_ms": 1000.0 / config.RISK_UPDATE_MIN_HZ},
+    }
+
+
 def setup_csv_logger():
     os.makedirs(config.LOGS_DIR, exist_ok=True)
     path = os.path.join(config.LOGS_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}.csv")
@@ -158,7 +209,11 @@ def main():
     calib_ear, calib_mar, calib_pitch, calib_yaw = [], [], [], []
 
     prev_time = time.monotonic()
-    fps_display = 0.0   # smoothed FPS for the live view's status bar
+    fps_display = 0.0   # smoothed FPS for the dashboard
+    # Latest values from the [PROFILE] cadence, for the dashboard
+    last_stages, last_rate_hz, last_gap_window_ms = {}, None, None
+    last_thermal, last_sysinfo = None, None
+    calib_baseline = None   # calibrated values, for the dashboard
     last_console_log = 0.0
     last_csv_log = 0.0
     last_yolo_submit = 0.0
@@ -279,6 +334,8 @@ def main():
                         drowsiness.set_mouth_baseline(baseline_mar)
                         head_pose_tracker.set_baseline(baseline_pitch, baseline_yaw)
                         calibrating = False
+                        calib_baseline = {"ear": baseline_ear, "mar": baseline_mar,
+                                    "pitch": baseline_pitch, "yaw": baseline_yaw}
                         print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
                 elif show:
@@ -291,6 +348,20 @@ def main():
                 # full HIGH alarm (see Risk.WAITING).
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
                 risk_last_t = None  # not classifying yet - see risk-rate block
+                if web.wants_status(now):
+                    health = alerts.health(now)
+                    web.set_status(dashboard_state(
+                        risk=Risk.WAITING, debug={"case": "CALIBRATING"},
+                        messages=["Calibrating - look straight at the camera"],
+                        presence=None, face_found=face_found, drowsy_state=None, drowsiness=drowsiness,
+                        ear=smoothed_ear, mar=smoothed_mar, pose_state=None,
+                        yolo_state=yolo.get_latest(), yolo=yolo, std_dev=std_dev, brightness=brightness,
+                        perf={"fps": _r(fps_display, 1), "stages_ms": last_stages},
+                        thermal=last_thermal, sysinfo=last_sysinfo,
+                        links={**health, "yolo": yolo.health(now)["state"]}, baseline=calib_baseline,
+                        calibrating=True,
+                        calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
+                                        if calibration_start is not None else 0.0)), now)
 
                 if show and face_found:
                     face_mesh.draw(frame, drawable)
@@ -371,10 +442,21 @@ def main():
             )
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
-            if web.enabled:
-                web.set_status({"risk": risk.name, "case": debug.get("case", "NONE"),
-                                "score": debug.get("score"), "messages": messages[:4],
-                                "fps": round(fps_display, 1), "presence": presence.name})
+            if web.wants_status(now):
+                health = alerts.health(now)
+                yh = yolo.health(now)
+                web.set_status(dashboard_state(
+                    risk=risk, debug=debug, messages=messages, presence=presence, face_found=face_found,
+                    drowsy_state=drowsy_state, drowsiness=drowsiness, ear=smoothed_ear, mar=smoothed_mar,
+                    pose_state=pose_state, yolo_state=yolo_state, yolo=yolo,
+                    std_dev=std_dev, brightness=brightness,
+                    perf={"fps": _r(fps_display, 1), "stages_ms": last_stages,
+                          "rate_hz": last_rate_hz, "gap_window_ms": last_gap_window_ms,
+                          "gap_session_ms": _r(risk_gap_session_max * 1000, 0),
+                          "camera_fps": config.CAMERA_FPS},
+                    thermal=last_thermal, sysinfo=last_sysinfo,
+                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1)},
+                    baseline=calib_baseline), now)
 
             if risk == Risk.WAITING:
                 risk_last_t = None
@@ -392,10 +474,13 @@ def main():
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
-            if show:
+            if display_due:
                 cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
 
+            # The detailed text panel is only for the local window - the web
+            # dashboard shows the same values as proper UI next to the video.
+            if display_due:
                 panel = [
                     f"Eyes: {'CLOSED' if drowsy_state['eye_closed'] else 'OPEN'}  "
                     f"EAR={smoothed_ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
@@ -447,7 +532,7 @@ def main():
             fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
             prev_time = curr_time
             fps_display = fps if not fps_display else 0.9 * fps_display + 0.1 * fps
-            if show:
+            if display_due:
                 cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
@@ -571,6 +656,7 @@ def main():
                 breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
                                       for k, v in stage_totals.items())
                 print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
+                last_stages = {k: round(v / profile_frames * 1000, 1) for k, v in stage_totals.items()}
                 if stutter_count:
                     worst_total, worst_baseline, worst_stages = stutter_worst
                     print(f"[STUTTER] {stutter_count} of {profile_frames} frames "
@@ -583,6 +669,7 @@ def main():
                 t_window = time.monotonic()
                 if risk_updates:
                     rate = risk_updates / (t_window - risk_window_start)
+                    last_rate_hz, last_gap_window_ms = round(rate, 1), round(risk_gap_window_max * 1000)
                     verdict = "PASS" if risk_gap_session_max <= risk_max_gap else "FAIL"
                     print(f"[RISK-RATE] {rate:.1f} Hz over {risk_updates} classifications "
                           f"| longest gap {risk_gap_window_max * 1000:.0f}ms "
@@ -603,6 +690,7 @@ def main():
                 # symptom of thermal throttling or under-voltage, and no
                 # software fix elsewhere in this app can solve that.
                 thermal = utils.check_pi_thermal_status()
+                last_thermal = thermal if thermal["available"] else None
                 if thermal["available"]:
                     if thermal["flags"]:
                         print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  "
@@ -617,6 +705,7 @@ def main():
                 # out of CPU (load), out of RAM (swapping to the SD card
                 # stalls everything, not just this app) or leaking threads.
                 sysinfo = utils.system_status()
+                last_sysinfo = sysinfo
                 if sysinfo:
                     print(f"[SYSTEM] load={sysinfo['load1']:.2f} (cores={sysinfo['cores']}) "
                           f"mem_available={sysinfo['mem_available_mb']:.0f}MB "
