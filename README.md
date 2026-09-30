@@ -41,6 +41,7 @@ DriverGuardian/
 │   ├── head_pose.py       # Phase 7: pitch/yaw/roll via solvePnP
 │   ├── yolo_detector.py   # Phase 8, 11: object detection (runs in its own process)
 │   ├── yolo_service.py    # entry point of that YOLO process
+│   ├── web_view.py        # live view in a browser (http://<pi>.local:8080)
 │   ├── risk_engine.py     # Phase 13: fuse everything into a risk level
 │   ├── alerts.py          # Phase 14: routes risk to voice + ESP32 Bluetooth link
 │   ├── voice.py           # spoken alerts: phrases, chimes, pacing
@@ -210,11 +211,35 @@ python -m app.main
 ```
 
 - Look straight at the camera with eyes open for the 3-second calibration.
-- Live status panel shows every signal changing in real time (EAR, head pitch/yaw,
-  blink rate, YOLO detections, current risk score).
-- Console prints a live log line every 0.5s; a full CSV log is saved per session
+- Watch it live in a browser (below). The overlay shows every signal changing in
+  real time (EAR, head pitch/yaw, blink rate, YOLO detections, current risk score).
+- Console prints a live log line every second; a full CSV log is saved per session
   under `logs/`.
-- Press `r` to recalibrate at any time, `q` to quit.
+- Recalibrate with the **Recalibrate** button on the live page; stop with Ctrl+C.
+
+### Watching it live (remote testing)
+
+The app serves its own live view. On any device on the same network open:
+
+```
+http://pi5.local:8080        (use your Pi's hostname, or the IP printed at startup)
+```
+
+It shows the annotated camera image, the current risk level, case and FPS, and a
+**Recalibrate** button. Several people can watch at once, and frames are only
+encoded while someone is watching.
+
+**Don't watch the app through remote-desktop screen sharing** (Raspberry Pi
+Connect's screen sharing, VNC). The Pi 5 has no hardware video encoder, so it
+re-encodes its whole desktop in software, and a live camera window makes the
+remote desktop lag and stutter. The app's own window is therefore off by
+default on the Pi (it stays on on a Mac/PC). Use Pi Connect's *remote shell* or `ssh dms@pi5.local` to run commands,
+and the browser to watch.
+
+- A monitor plugged straight into the Pi can still show the window:
+  `DG_DISPLAY=1 python -m app.main` (keys: `r` recalibrate, `q` quit).
+- A network cable is more reliable than Wi-Fi for long test sessions: the Pi's
+  Wi-Fi shares its radio with Bluetooth (the ESP32 link).
 
 ## Run at boot
 

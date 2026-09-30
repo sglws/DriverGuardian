@@ -6,6 +6,7 @@ Phase 1 deliverable: environment/config setup.
 """
 
 import os
+import sys
 
 # --------------------------------------------------------------------------
 # Paths
@@ -54,7 +55,24 @@ CAMERA_FPS = 20
 # the camera/ISP path or from cv2.imshow()/compositor rendering - if the
 # freeze still happens with this False, it's not about the display.
 # No 'r' recalibration key when False (see main.py); quit via Ctrl+C.
-DISPLAY_ENABLED = True
+# Local preview window: ON on a Mac/PC, OFF on the Pi (Linux). On the Pi,
+# watch the app in a browser instead (WEB_VIEW below) - over remote desktop
+# (Pi Connect / VNC) the constantly-changing camera window makes the whole
+# remote desktop lag, since the Pi 5 re-encodes its screen in software.
+# Override for one run: DG_DISPLAY=1 (e.g. a monitor plugged into the Pi)
+# or DG_DISPLAY=0.
+DISPLAY_ENABLED = not sys.platform.startswith("linux")
+# ---- Live view in a web browser (app/web_view.py) ----
+# Open http://<pi-hostname>.local:8080 on any device on the same network
+# (e.g. http://pi5.local:8080). Frames are only encoded while someone is
+# watching, so it costs nothing otherwise.
+WEB_VIEW_ENABLED = True
+WEB_VIEW_HOST = "0.0.0.0"       # all network interfaces; "127.0.0.1" = this machine only
+WEB_VIEW_PORT = 8080
+WEB_VIEW_FPS = 10               # stream frame rate (detection still runs at full rate)
+WEB_VIEW_WIDTH = 960            # stream width in pixels (smaller = less network)
+WEB_VIEW_JPEG_QUALITY = 70
+
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
 APP_NICE = 10
@@ -71,11 +89,10 @@ APP_NICE = 10
 # cv2.waitKey() still runs every frame regardless (see main.py) - it
 # processes GUI/keyboard events for the window, unrelated to whether a
 # new frame was actually pushed that iteration.
-# 2 = the preview window updates at half the processing rate (~7-9 FPS on
-# the Pi). Detection still runs on every frame; this halves the software
-# rendering work handed to the desktop compositor, which is shared with
-# everything else on screen.
-DISPLAY_EVERY_N_FRAMES = 2
+# 1 = the preview updates on every processed frame. 2 (half rate) was tried
+# to lighten the compositor load but made the desktop feel worse on the Pi,
+# not better - left at 1. Try DG_DISPLAY_EVERY=2 for a one-off comparison.
+DISPLAY_EVERY_N_FRAMES = 1
 # Scale factor applied to the preview frame just before cv2.imshow() -
 # 1.0 means no resize. Detection is completely unaffected: everything
 # (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
@@ -362,6 +379,9 @@ SCORE_HIGH_MIN = 4
 # --------------------------------------------------------------------------
 # Logging
 # --------------------------------------------------------------------------
+# The per-second status line in the terminal. False = no live log (the CSV
+# session log, [PROFILE]/[SYSTEM] diagnostics and warnings still print).
+CONSOLE_LOG_ENABLED = True
 CONSOLE_LOG_INTERVAL_SEC = 1.0
 CSV_LOG_INTERVAL_SEC = 1.0
 # Requirement check: "classification update rate of at least 0.2 Hz" means
@@ -444,6 +464,11 @@ _ENV_OVERRIDES = {
     "DG_YOLO": ("YOLO_ENABLED", bool),
     "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
     "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
+    "DG_ESP32": ("ESP32_LINK_ENABLED", bool),
+    "DG_LOG": ("CONSOLE_LOG_ENABLED", bool),
+    "DG_WEB": ("WEB_VIEW_ENABLED", bool),
+    "DG_WEB_FPS": ("WEB_VIEW_FPS", int),
+    "DG_WEB_WIDTH": ("WEB_VIEW_WIDTH", int),
 }
 for _var, (_name, _type) in _ENV_OVERRIDES.items():
     if _var in os.environ:

@@ -88,6 +88,7 @@ from app.head_pose import estimate_pose, HeadPoseTracker
 from app.yolo_detector import YoloProcess
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
+from app.web_view import WebView
 
 RISK_COLORS = {
     Risk.WAITING: (200, 200, 200),
@@ -129,6 +130,7 @@ def main():
     yolo = YoloProcess()   # own process - see yolo_detector.YoloProcess
     risk_engine = RiskEngine()
     alerts = AlertSystem()
+    web = WebView()   # live view in a browser - see app/web_view.py
 
     # Symmetric debounce: presence loss needs NO_FACE_GRACE_SEC to escalate
     # and PRESENCE_RECOVER_SEC of a confirmed face to clear. Obstruction
@@ -156,6 +158,7 @@ def main():
     calib_ear, calib_mar, calib_pitch, calib_yaw = [], [], [], []
 
     prev_time = time.monotonic()
+    fps_display = 0.0   # smoothed FPS for the live view's status bar
     last_console_log = 0.0
     last_csv_log = 0.0
     last_yolo_submit = 0.0
@@ -197,12 +200,9 @@ def main():
         while True:
             t_loop_start = time.perf_counter()
             frame_count += 1
-            # Drawing and the preview window only happen on frames that are
-            # actually shown (every DISPLAY_EVERY_N_FRAMES): overlays drawn on
-            # a frame nobody sees, and a waitKey() that blocks on the
-            # compositor (~24 ms measured on the Pi) on every frame, were pure
-            # waste on the skipped ones.
-            show = config.DISPLAY_ENABLED and frame_count % config.DISPLAY_EVERY_N_FRAMES == 0
+            # The preview window only updates every DISPLAY_EVERY_N_FRAMES
+            # (waitKey() blocks on the compositor, ~24 ms measured on the Pi).
+            display_due = config.DISPLAY_ENABLED and frame_count % config.DISPLAY_EVERY_N_FRAMES == 0
             ret, frame = camera.read()
             if not ret:
                 print("Camera read failed - stopping.")
@@ -217,6 +217,10 @@ def main():
             # clock battery - which would make any timer running at that
             # moment read "hours elapsed" and fire a false HIGH alert.
             now = time.monotonic()
+            # Overlays are only drawn on frames someone will actually see -
+            # the local window and/or a browser watching the live view.
+            stream_due = web.wants_frame(now)
+            show = display_due or stream_due
 
             # Obstruction/brightness are measured on the RAW frame first -
             # CLAHE enhancement below would artificially inflate the local
@@ -288,9 +292,11 @@ def main():
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
                 risk_last_t = None  # not classifying yet - see risk-rate block
 
-                if show:
-                    if face_found:
-                        face_mesh.draw(frame, drawable)
+                if show and face_found:
+                    face_mesh.draw(frame, drawable)
+                if stream_due:
+                    web.publish(frame, now)
+                if display_due:
                     cv2.imshow("DriverGuardian", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
@@ -365,6 +371,11 @@ def main():
             )
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
+            if web.enabled:
+                web.set_status({"risk": risk.name, "case": debug.get("case", "NONE"),
+                                "score": debug.get("score"), "messages": messages[:4],
+                                "fps": round(fps_display, 1), "presence": presence.name})
+
             if risk == Risk.WAITING:
                 risk_last_t = None
             else:
@@ -435,6 +446,7 @@ def main():
             curr_time = time.monotonic()
             fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
             prev_time = curr_time
+            fps_display = fps if not fps_display else 0.9 * fps_display + 0.1 * fps
             if show:
                 cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
@@ -442,7 +454,7 @@ def main():
                             cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
 
             # ---- Console live log ----
-            if now - last_console_log >= config.CONSOLE_LOG_INTERVAL_SEC:
+            if config.CONSOLE_LOG_ENABLED and now - last_console_log >= config.CONSOLE_LOG_INTERVAL_SEC:
                 last_console_log = now
                 print(f"[{utils.timestamp()}] RISK={risk.name:6s} case={debug.get('case', 'NONE'):16s} score={debug.get('score')} | "
                       f"Eyes={'CLOSED' if drowsy_state['eye_closed'] else 'OPEN':6s} "
@@ -468,7 +480,9 @@ def main():
                 log_file.flush()
 
             t_risk_draw = time.perf_counter()
-            if show:
+            if stream_due:
+                web.publish(frame, now)
+            if display_due:
                 # Preview-only downscale - see config.DISPLAY_SCALE.
                 # Everything downstream of detection already ran on the
                 # full-resolution frame, so this costs no accuracy; it
@@ -613,7 +627,7 @@ def main():
 
             if key == ord('q'):
                 break
-            elif key == ord('r'):
+            elif key == ord('r') or web.take_command() == "recalibrate":
                 calibrating = True
                 calibration_start = None
                 calib_ear.clear()
@@ -629,6 +643,7 @@ def main():
 
     finally:
         alerts.close()  # stop any alert still being spoken
+        web.close()
         camera.release()
         cv2.destroyAllWindows()
         presence_detector.close()
