@@ -70,8 +70,8 @@ WEB_VIEW_ENABLED = True
 WEB_VIEW_HOST = "0.0.0.0"       # all network interfaces; "127.0.0.1" = this machine only
 WEB_VIEW_PORT = 8080
 WEB_VIEW_FPS = 10               # stream frame rate (detection still runs at full rate)
-WEB_VIEW_WIDTH = 960            # stream width in pixels (smaller = less network)
-WEB_VIEW_JPEG_QUALITY = 70
+WEB_VIEW_WIDTH = 1280           # stream width in pixels; 1280 = full camera resolution
+WEB_VIEW_JPEG_QUALITY = 80      # ~5 Mbit/s at 1280 px / 10 fps; lower both for a weak network
 
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
@@ -469,6 +469,7 @@ _ENV_OVERRIDES = {
     "DG_WEB": ("WEB_VIEW_ENABLED", bool),
     "DG_WEB_FPS": ("WEB_VIEW_FPS", int),
     "DG_WEB_WIDTH": ("WEB_VIEW_WIDTH", int),
+    "DG_WEB_QUALITY": ("WEB_VIEW_JPEG_QUALITY", int),
 }
 for _var, (_name, _type) in _ENV_OVERRIDES.items():
     if _var in os.environ:
