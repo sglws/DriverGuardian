@@ -15,7 +15,7 @@ Design
     re-rendered only when a phrase or the TTS engine changes) and
     loudness-normalized, so every alert plays at the same level with zero
     synthesis delay at runtime. Engine: Piper (natural neural voice, if
-    VOICE_PIPER_MODEL is set) > espeak-ng > macOS `say`.
+    VOICE_PIPER_VOICE is installed) > espeak-ng > macOS `say`.
   * Playback is a separate player process that is never waited on, started
     from the main thread - no threads (fork() from a background thread
     while Qt is loaded is this project's proven freeze; see alerts.py).
@@ -33,6 +33,8 @@ Pacing (what keeps it calm instead of noisy)
 """
 
 import hashlib
+import importlib.util
+import json
 import math
 import os
 import shutil
@@ -96,25 +98,42 @@ def _find(*names):
     return None
 
 
+def _piper_model():
+    """Path of the configured Piper voice model, or None if not installed.
+    VOICE_PIPER_VOICE is a voice name (looked up in models/piper/) or a path."""
+    voice = getattr(config, "VOICE_PIPER_VOICE", "")
+    if not voice or importlib.util.find_spec("piper") is None:
+        return None
+    path = voice if voice.endswith(".onnx") else os.path.join(config.MODELS_DIR, "piper", voice + ".onnx")
+    return path if os.path.exists(path) and os.path.exists(path + ".json") else None
+
+
 def _tts_engine():
-    model = getattr(config, "VOICE_PIPER_MODEL", "")
-    piper = _find("piper")
-    # The engine name includes the voice/model so the prompt cache
-    # re-renders when either changes.
-    if piper and model and os.path.exists(model):
-        return f"piper:{os.path.basename(model)}", lambda text, out: subprocess.run(
-            [piper, "--model", model, "--output_file", out], input=text, text=True,
-            capture_output=True, timeout=60, check=True)
+    """(engine_name, render) - render(jobs) writes each [(text, wav_path)].
+    The engine name includes the voice so the prompt cache re-renders when
+    the voice changes. Preference: Piper (natural) > espeak-ng > macOS say."""
+    model = _piper_model()
+    if model:
+        def render(jobs):
+            # one process for every phrase: the voice model loads only once
+            subprocess.run([sys.executable, "-m", "app.piper_render", model],
+                           input=json.dumps(jobs), text=True, capture_output=True,
+                           timeout=300, check=True, cwd=config.BASE_DIR)
+        return f"piper:{os.path.basename(model)}", render
     espeak = _find("espeak-ng", "espeak")
     if espeak:
-        return "espeak:en-us", lambda text, out: subprocess.run(
-            [espeak, "-v", "en-us", "-s", "150", "-w", out, text],
-            capture_output=True, timeout=30, check=True)
+        def render(jobs):
+            for text, out in jobs:
+                subprocess.run([espeak, "-v", "en-us", "-s", "150", "-w", out, text],
+                               capture_output=True, timeout=30, check=True)
+        return "espeak:en-us", render
     say = _find("say")
     if say:
-        return "say", lambda text, out: subprocess.run(
-            [say, "-o", out, "--data-format=LEI16@22050", text],   # macOS system voice
-            capture_output=True, timeout=30, check=True)
+        def render(jobs):
+            for text, out in jobs:   # macOS system voice
+                subprocess.run([say, "-o", out, "--data-format=LEI16@22050", text],
+                               capture_output=True, timeout=30, check=True)
+        return "say", render
     return None, None
 
 
@@ -130,13 +149,10 @@ def _read_wav(path):
     return rate, data / 32768.0
 
 
-def _synthesize(engine_fn, text):
+def _clean_speech(raw_path):
     """Speech for one phrase: trimmed of the engine's own leading/trailing
     silence and peak-normalized, so every prompt plays at the same level."""
-    raw = os.path.join(_CACHE_DIR, "_tts_tmp.wav")
-    engine_fn(text, raw)
-    rate, speech = _read_wav(raw)
-    os.remove(raw)
+    rate, speech = _read_wav(raw_path)
     idx = np.flatnonzero(np.abs(speech) > 0.01)
     if idx.size:
         speech = speech[idx[0]:idx[-1] + 1]
@@ -184,7 +200,7 @@ class VoiceAlerts:
         else:
             player = _find("pw-play", "paplay", "aplay")
             self._player = ([player, "-q"] if player and player.endswith("aplay") else [player]) if player else None
-        engine, engine_fn = _tts_engine()
+        engine, render = _tts_engine()
         if not self._player or not engine:
             print(f"[VOICE] unavailable - "
                   f"{'no audio player' if not self._player else 'no TTS engine'} found. "
@@ -192,26 +208,38 @@ class VoiceAlerts:
             return
 
         os.makedirs(_CACHE_DIR, exist_ok=True)
-        rendered = 0
+        todo = []   # (case, text, {critical: path}) still missing from the cache
         for case, (text, _) in PROMPTS.items():
             paths = {}
             for critical in (False, True):
                 tag = hashlib.sha1(f"{_RENDER_VERSION}|{engine}|{critical}|{text}".encode()).hexdigest()[:10]
                 paths[critical] = os.path.join(_CACHE_DIR, f"{case.lower()}_{'crit' if critical else 'warn'}_{tag}.wav")
-            missing = [c for c, path in paths.items() if not os.path.exists(path)]
-            if missing:
+            if any(not os.path.exists(path) for path in paths.values()):
+                todo.append((case, text, paths))
+            else:
+                for critical, path in paths.items():
+                    self._files[(case, critical)] = path
+        if todo:
+            print(f"[VOICE] rendering {len(todo)} phrases with {engine} (first start / voice change)...")
+            raws = [os.path.join(_CACHE_DIR, f"_raw_{i}.wav") for i in range(len(todo))]
+            try:
+                render([(text, raw) for (_, text, _), raw in zip(todo, raws)])
+            except Exception as e:
+                detail = getattr(e, "stderr", "") or ""
+                print(f"[VOICE] rendering failed ({engine}): {e} {detail[-300:]}")
+            for (case, text, paths), raw in zip(todo, raws):
                 try:
-                    rate, speech = _synthesize(engine_fn, text)   # once per phrase
-                    for critical in missing:
-                        _write_prompt(rate, speech, critical, paths[critical])
-                    rendered += 1
+                    rate, speech = _clean_speech(raw)
+                    for critical, path in paths.items():
+                        _write_prompt(rate, speech, critical, path)
+                        self._files[(case, critical)] = path
                 except Exception as e:
                     print(f"[VOICE] could not render '{text}': {e}")
-                    continue
-            for critical, path in paths.items():
-                self._files[(case, critical)] = path
-        print(f"[VOICE] ready - {len(PROMPTS)} phrases ({engine}, "
-              f"{rendered} newly rendered), playing via {os.path.basename(self._player[0])}")
+                finally:
+                    if os.path.exists(raw):
+                        os.remove(raw)
+        print(f"[VOICE] ready - {len(self._files) // 2} of {len(PROMPTS)} phrases ({engine}, "
+              f"{len(todo)} newly rendered), playing via {os.path.basename(self._player[0])}")
 
     def _busy(self, now):
         if self._proc is not None and self._proc.poll() is not None:   # poll() also reaps it

@@ -119,18 +119,22 @@ already handles it.
 
 ### Voice alerts (Pi)
 
-Spoken alerts use `espeak-ng` and play through the desktop's default audio
-output (a Bluetooth speaker works - pick it from the volume icon):
+Spoken alerts use **Piper** (natural, offline neural voice) and play through
+the desktop's default audio output (a Bluetooth speaker works - pick it from
+the volume icon). One-time setup:
 
 ```bash
-sudo apt install -y espeak-ng
+pip install piper-tts                 # (already in requirements.txt)
+python tools/get_piper_voice.py       # downloads the voice set in VOICE_PIPER_VOICE (~60 MB)
+sudo apt install -y espeak-ng         # fallback voice if Piper isn't installed
 ```
 
 Each alert is a short chime plus one fixed phrase (see `PROMPTS` in
-`app/voice.py`), rendered once into `assets/voice_cache/` on first start.
-For a more natural voice, install Piper (`pip install piper-tts`), download
-a voice model (`.onnx` + `.onnx.json`), and set `VOICE_PIPER_MODEL` in
-`app/config.py` to its path - the prompts re-render automatically.
+`app/voice.py`), rendered once into `assets/voice_cache/` on first start
+(~10 s on the Pi with Piper) and played from the cache afterwards. To change
+the voice, set `VOICE_PIPER_VOICE` in `app/config.py` (e.g. `en_US-amy-medium`,
+`en_US-ryan-high`), download it with `tools/get_piper_voice.py <voice>` and
+restart. Voice files live in `models/piper/` and are not committed (too large).
 
 ## ESP32 (Bluetooth link to buzzer/vibration/LEDs/hazard relay)
 
@@ -255,6 +259,20 @@ and the browser to watch.
   `DG_DISPLAY=1 python -m app.main` (keys: `r` recalibrate, `q` quit).
 - A network cable is more reliable than Wi-Fi for long test sessions: the Pi's
   Wi-Fi shares its radio with Bluetooth (the ESP32 link).
+
+## Testing the requirements
+
+Each measurable requirement has a tool that prints PASS/FAIL. Stop the app
+before the tools that use the camera or the ESP32 (`systemctl --user stop
+driverguardian.service` if it runs as a service).
+
+| Requirement | Command (on the Pi) | Notes |
+|---|---|---|
+| Eye state and yawning >= 90% | `python tools/face_accuracy_test.py --condition normal`<br>`python tools/face_accuracy_test.py --condition dim`<br>`python tools/face_accuracy_test.py --report logs/face_accuracy_*.csv` | Guided script (beeps); 2+ people x normal and dim light. Uses balanced accuracy for eyes, per-event accuracy for yawns. |
+| Detection delay <= 1 s | `python tools/detection_delay_test.py --object phone`<br>(`--object consumption`, `--object cigarette`) | Raise the object at each beep. Onset is found by YOLO on every recorded frame, so the tester's reaction time doesn't count. |
+| Update rate >= 12 Hz average, no gap > 1 s | `DG_RISK_LOG=1 python -m app.main` (monitor, then quit)<br>`python tools/check_update_rate.py` | Calibration/waiting pauses are excluded (logged as separate segments). Also live on the dashboard. |
+| Bluetooth latency p99 <= 50 ms, max <= 100 ms | `python tools/bt_latency_benchmark.py --audio --label "wifi + speaker"` | Needs the `esp32/latency_echo` sketch on the ESP32. `--audio` plays the speaker during the run (shared radio). `python tools/plot_latency.py` makes the report figure. |
+| 16:9 YOLO model equivalent | `python tools/compare_yolo_models.py --seconds 90` | Show phone, cup/bottle, food, cigarette (or a pen), seatbelt on/off. Saves frames where the models disagree. |
 
 ## Run at boot
 

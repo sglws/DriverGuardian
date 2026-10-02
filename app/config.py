@@ -327,15 +327,12 @@ SEATBELT_UNWORN_ESCALATE_SEC = 10.0
 # (hands, steering, camera angle), so re-confirming "on" should be fast;
 # a real removal is sustained, so confirming "off" should be patient.
 SEATBELT_ON_CONFIRM_SEC = 0.5    # belt seen worn -> confirm "on" quickly
-SEATBELT_OFF_CONFIRM_SEC = 12.0  # belt continuously unseen this long -> confirm "off".
-                                 # Raised from 6.0: this only ever applies AFTER the belt
-                                 # has been confirmed worn at least once (see
-                                 # _seatbelt_ever_seen in yolo_detector.py), so a belt that
-                                 # drops out of view is far more likely occluded - hands,
-                                 # steering, arm across the chest, camera angle - than
-                                 # actually unbuckled mid-drive. Being patient here costs
-                                 # little because a genuine removal stays unseen and still
-                                 # trips, just later.
+SEATBELT_OFF_CONFIRM_SEC = 5.0   # belt continuously unseen this long -> confirm "off".
+                                 # Only applies AFTER the belt has been confirmed worn at
+                                 # least once (see _seatbelt_ever_seen in yolo_detector.py).
+                                 # Trade-off: a belt hidden by hands/arms/steering for longer
+                                 # than this also reads as "off". Was 12 s; lowered for a
+                                 # quicker reaction.
 
 # K-of-N voting: an object flag only counts as active once it appears in at
 # least YOLO_CONFIRM_MIN of the last YOLO_CONFIRM_WINDOW inferences. Symmetric
@@ -441,9 +438,11 @@ VOICE_ALERTS_ENABLED = True
 VOICE_MIN_GAP_SEC = 2.0          # silence between any two prompts
 VOICE_CONFIRM_SEC = 0.5          # a warning must persist this long before it is spoken
 VOICE_CRITICAL_REPEAT_SEC = 4.0  # HIGH-risk prompt repeats while the danger lasts
-# Optional natural-sounding voice: path to a Piper .onnx voice model (needs
-# the `piper` command, e.g. pip install piper-tts). Empty = espeak-ng/say.
-VOICE_PIPER_MODEL = ""
+# Natural-sounding voice (Piper, offline neural TTS - pip install piper-tts).
+# A voice name looked up in models/piper/ (download with
+# tools/get_piper_voice.py), or a path to an .onnx voice. Used when installed;
+# otherwise espeak-ng (Pi) / say (macOS). Phrases render once and are cached.
+VOICE_PIPER_VOICE = "en_US-ryan-high"
 ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # wait after a failed connection attempt...
 ESP32_RECONNECT_MAX_COOLDOWN_SEC = 30.0  # ...doubling on each further failure, up to this
 # Each attempt ties up the Pi's Bluetooth radio for several seconds while it
@@ -471,6 +470,7 @@ _ENV_OVERRIDES = {
     "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
     "DG_ESP32": ("ESP32_LINK_ENABLED", bool),
     "DG_LOG": ("CONSOLE_LOG_ENABLED", bool),
+    "DG_RISK_LOG": ("RISK_UPDATE_LOG", bool),
     "DG_WEB": ("WEB_VIEW_ENABLED", bool),
     "DG_WEB_FPS": ("WEB_VIEW_FPS", int),
     "DG_WEB_WIDTH": ("WEB_VIEW_WIDTH", int),

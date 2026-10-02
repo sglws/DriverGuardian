@@ -5,3 +5,4 @@ mediapipe>=0.10.14,<1.0 ; sys_platform == "darwin"
 mediapipe>=0.10.14 ; sys_platform != "darwin"
 numpy
 ultralytics
+piper-tts

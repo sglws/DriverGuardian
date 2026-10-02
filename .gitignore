@@ -53,3 +53,6 @@ esp32/
 
 # Project documents (requirements, reports, plots) - kept out of git
 documents/
+
+# Piper voice models (~60-120 MB each) - download with tools/get_piper_voice.py
+models/piper/

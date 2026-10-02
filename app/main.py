@@ -200,7 +200,7 @@ def main():
         risk_log_path = log_path.replace("session_", "risk_updates_")
         risk_log_file = open(risk_log_path, "w", newline="")
         risk_log_writer = csv.writer(risk_log_file)
-        risk_log_writer.writerow(["t_monotonic", "risk", "case"])
+        risk_log_writer.writerow(["t_monotonic", "risk", "case", "segment"])
         print(f"Logging every risk classification to: {risk_log_path}")
 
     # ---- Calibration state ----
@@ -245,6 +245,7 @@ def main():
     risk_updates = 0
     risk_last_t = None
     risk_window_start = time.monotonic()
+    risk_segment = 0   # increments each time classification (re)starts after WAITING
     risk_gap_window_max = 0.0
     risk_gap_session_max = 0.0
 
@@ -462,6 +463,8 @@ def main():
                 risk_last_t = None
             else:
                 t_class = time.monotonic()
+                if risk_last_t is None:
+                    risk_segment += 1
                 if risk_last_t is not None:
                     gap = t_class - risk_last_t
                     risk_gap_window_max = max(risk_gap_window_max, gap)
@@ -470,7 +473,7 @@ def main():
                 risk_updates += 1
                 if risk_log_writer is not None:
                     risk_log_writer.writerow([f"{t_class:.6f}", risk.name,
-                                              debug.get("case", "NONE")])
+                                              debug.get("case", "NONE"), risk_segment])
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]

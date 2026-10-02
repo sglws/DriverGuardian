@@ -14,16 +14,32 @@ IMPORTANT - transport choice:
   (the default) is what reproduces production. `--transport serial` is kept
   only for comparing the two paths.
 
+Stop the app first - the ESP32 accepts only one Bluetooth connection.
+
 Usage on the Pi:
     python3 tools/bt_latency_benchmark.py                      # matches production
+    python3 tools/bt_latency_benchmark.py --audio --label "wifi + speaker playing"
     python3 tools/bt_latency_benchmark.py --interval 0.05      # stress cadence
     python3 tools/bt_latency_benchmark.py --transport serial --port /dev/rfcomm0
+
+--audio keeps the default audio output (e.g. the Bluetooth speaker) playing
+for the whole run: the Pi's Bluetooth radio is shared between the speaker and
+the ESP32 link (and with Wi-Fi on the Pi's combo chip), so this is the
+realistic worst case. Requirement: round trip p99 <= 50 ms, max <= 100 ms.
 """
 
 import argparse
 import contextlib
 import csv
+import glob
+import math
+import os
+import shutil
+import signal
 import socket
+import struct
+import subprocess
+import wave
 import statistics
 import sys
 import time
@@ -147,7 +163,37 @@ def run(link, samples, warmup, interval, timeout):
     return rtts, mismatched, timed_out, total
 
 
-def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_path):
+class AudioLoad:
+    """Keeps the default audio output playing (a loop of an alert prompt, or
+    a tone) for the duration of the benchmark."""
+
+    def __init__(self):
+        player = shutil.which("pw-play") or shutil.which("paplay") or shutil.which("aplay") or shutil.which("afplay")
+        if not player:
+            raise RuntimeError("no audio player found (pw-play / paplay / aplay / afplay)")
+        here = os.path.dirname(os.path.abspath(__file__))
+        prompts = sorted(glob.glob(os.path.join(here, "..", "assets", "voice_cache", "*.wav")))
+        self.wav = prompts[0] if prompts else self._tone()
+        self.proc = subprocess.Popen(
+            ["sh", "-c", f'while true; do "{player}" "{self.wav}"; done'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+        self.desc = f"{os.path.basename(player)} looping {os.path.basename(self.wav)}"
+
+    @staticmethod
+    def _tone(path="/tmp/bt_bench_tone.wav", sec=3.0, rate=22050):
+        with wave.open(path, "wb") as w:
+            w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate)
+            w.writeframes(b"".join(struct.pack("<h", int(8000 * math.sin(2 * math.pi * 440 * i / rate)))
+                                   for i in range(int(sec * rate))))
+        return path
+
+    def stop(self):
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(self.proc.pid, signal.SIGTERM)
+
+
+def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_path,
+           conditions="", req_p99=50.0, req_max=100.0):
     if not rtts:
         print("No successful round trips - nothing to report.", file=sys.stderr)
         return 1
@@ -162,6 +208,8 @@ def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_
 
     print("\n--- Bluetooth SPP Round-Trip Latency ---")
     print(f"Transport:          {transport}")
+    if conditions:
+        print(f"Conditions:         {conditions}")
     print(f"Ping interval:      {interval * 1000:.0f} ms")
     print(f"Samples (measured): {len(rtts)}  (+{warmup} warm-up discarded, {total} sent)")
     print(f"Timeouts:           {timed_out}")
@@ -176,6 +224,12 @@ def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_
         print(f"Jitter (stdev):     {statistics.stdev(rtts):.2f} ms")
     print("\nNote: these are ROUND-TRIP times. They include the ESP32's own")
     print("receive+echo turnaround, so RTT/2 OVERSTATES one-way link latency.")
+    ok_p99, ok_max = pct(99) <= req_p99, max(rtts) <= req_max
+    lost = timed_out + mismatched
+    print(f"\nRequirement p99 <= {req_p99:g} ms:  {pct(99):.1f} ms  {'PASS' if ok_p99 else 'FAIL'}")
+    print(f"Requirement max <= {req_max:g} ms:  {max(rtts):.1f} ms  {'PASS' if ok_max else 'FAIL'}")
+    if lost:
+        print(f"Warning: {lost} ping(s) timed out or got a wrong reply - not included above.")
 
     if csv_path:
         with open(csv_path, "w", newline="") as f:
@@ -184,7 +238,7 @@ def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_
             for n, v in enumerate(rtts):
                 w.writerow([n, f"{v:.4f}"])
         print(f"\nRaw samples written to {csv_path} (for histogram/CDF plots).")
-    return 0
+    return 0 if ok_p99 and ok_max else 2
 
 
 def main():
@@ -206,6 +260,11 @@ def main():
     ap.add_argument("--timeout", type=float, default=2.0)
     ap.add_argument("--csv", default="bt_latency_samples.csv",
                     help="raw per-sample output; empty string to skip")
+    ap.add_argument("--audio", action="store_true",
+                    help="keep the speaker playing during the run (realistic radio load)")
+    ap.add_argument("--label", default="", help="free-text test conditions for the report")
+    ap.add_argument("--req-p99", type=float, default=50.0, help="requirement: p99 round trip (ms)")
+    ap.add_argument("--req-max", type=float, default=100.0, help="requirement: max round trip (ms)")
     args = ap.parse_args()
 
     try:
@@ -221,6 +280,15 @@ def main():
               "is rfcomm bound?", file=sys.stderr)
         return 1
 
+    audio = None
+    if args.audio:
+        try:
+            audio = AudioLoad()
+            print(f"Audio load: {audio.desc}")
+        except RuntimeError as e:
+            print(f"--audio: {e}", file=sys.stderr)
+            return 1
+    conditions = ", ".join(x for x in (args.label, "audio playing" if audio else "") if x)
     print(f"Benchmarking {desc}: {args.samples} samples "
           f"(+{args.warmup} warm-up) at {args.interval * 1000:.0f} ms intervals...")
     try:
@@ -228,8 +296,11 @@ def main():
                                        args.interval, args.timeout)
     finally:
         link.close()
+        if audio:
+            audio.stop()
 
-    return report(rtts, mism, touts, total, args.warmup, args.interval, desc, args.csv)
+    return report(rtts, mism, touts, total, args.warmup, args.interval, desc, args.csv,
+                  conditions, args.req_p99, args.req_max)
 
 
 if __name__ == "__main__":
