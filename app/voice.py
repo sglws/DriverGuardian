@@ -190,6 +190,7 @@ class VoiceAlerts:
         self._last_start = {}     # (case, critical) -> monotonic time
         self._candidate, self._candidate_since = None, 0.0
         self.last_text, self.last_at, self.seq = None, None, 0   # last prompt (for the dashboard)
+        self.muted = False                                        # set from the dashboard
         if not config.VOICE_ALERTS_ENABLED:
             print("[VOICE] disabled (VOICE_ALERTS_ENABLED = False)")
             return
@@ -264,6 +265,8 @@ class VoiceAlerts:
     def update(self, risk: Risk, case: str, now: float):
         """Call every frame with the current risk tier and case code."""
         busy = self._busy(now)   # every frame, so the end of a prompt is timed exactly
+        if self.muted:
+            return
         case = ALIASES.get(case, case)
         if risk == Risk.SAFE or case not in PROMPTS:
             self._candidate = None

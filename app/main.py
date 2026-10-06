@@ -89,6 +89,8 @@ from app.yolo_detector import YoloProcess
 from app.risk_engine import RiskEngine, Risk, PresenceState
 from app.alerts import AlertSystem
 from app.web_view import WebView
+from app.storage import SessionStore
+from app.session import SessionRecorder
 
 RISK_COLORS = {
     Risk.WAITING: (200, 200, 200),
@@ -105,13 +107,15 @@ def _r(x, nd=3):
 
 def dashboard_state(*, risk, debug, messages, presence, face_found, drowsy_state, drowsiness,
                     ear, mar, pose_state, yolo_state, yolo, std_dev, brightness,
-                    perf, thermal, sysinfo, links, baseline, calibrating=False, calib_progress=None):
+                    perf, thermal, sysinfo, links, baseline, calibrating=False, calib_progress=None,
+                    paused=False):
     """Everything the web dashboard shows, as plain JSON-able values."""
     seatbelt_off = yolo_state.get("seatbelt_off")
     return {
         "risk": risk.name, "case": debug.get("case", "NONE"), "score": debug.get("score"),
         "messages": list(messages[:4]), "presence": presence.name if presence else None,
         "face_found": face_found, "calibrating": calibrating, "calib_progress": calib_progress,
+        "paused": paused,
         "baseline": baseline,
         "eyes": None if drowsy_state is None else {
             "closed": drowsy_state["eye_closed"], "ear": _r(ear), "ear_thr": _r(drowsiness.closed_threshold),
@@ -181,7 +185,19 @@ def main():
     yolo = YoloProcess()   # own process - see yolo_detector.YoloProcess
     risk_engine = RiskEngine()
     alerts = AlertSystem()
-    web = WebView()   # live view in a browser - see app/web_view.py
+    # Session history (app/storage.py) and the live session (app/session.py):
+    # recorded whether or not anyone has the dashboard open.
+    store = None
+    if config.SESSION_HISTORY_ENABLED:
+        try:
+            store = SessionStore(config.SESSION_DB_PATH, keep=config.SESSION_HISTORY_KEEP)
+        except Exception as e:
+            print(f"[storage] session history unavailable: {e}")
+    recorder = SessionRecorder(store)
+    recorder.start()
+    web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
+    paused = False
+    recalibrate_requested = False
 
     # Symmetric debounce: presence loss needs NO_FACE_GRACE_SEC to escalate
     # and PRESENCE_RECOVER_SEC of a confirmed face to clear. Obstruction
@@ -246,6 +262,7 @@ def main():
     risk_last_t = None
     risk_window_start = time.monotonic()
     risk_segment = 0   # increments each time classification (re)starts after WAITING
+    risk_updates_session = 0   # classifications this session (dashboard: average update rate)
     risk_gap_window_max = 0.0
     risk_gap_session_max = 0.0
 
@@ -256,6 +273,52 @@ def main():
         while True:
             t_loop_start = time.perf_counter()
             frame_count += 1
+
+            # ---- Commands from the dashboard. Applied at the top of the loop
+            # so they also work during calibration. ----
+            stop_requested = False
+            for action, body in web.take_commands():
+                if action == "stop":
+                    stop_requested = True
+                elif action == "pause" and not paused:
+                    paused = True
+                elif action == "resume" and paused:
+                    paused = False
+                    risk_updates, risk_window_start = 0, time.monotonic()
+                    # timers that kept running while paused must not fire on resume
+                    drowsiness.reset()
+                    head_pose_tracker.clear_lean_case()
+                    presence_hysteresis.reset()
+                    obstruction_hysteresis.reset()
+                elif action in ("mute", "unmute"):
+                    alerts.set_muted(action == "mute")
+                elif action == "recalibrate":
+                    recalibrate_requested = True
+                    recorder.log("system", "info", "Recalibration requested", "from the dashboard")
+                elif action == "new_session":
+                    recorder.end("new session started from the dashboard")
+                    recorder.start(str(body.get("label") or ""))
+                    risk_gap_session_max = 0.0
+                    risk_updates_session = 0
+                    paused = False
+                    recalibrate_requested = True
+            if stop_requested:
+                print("[web] Stop requested from the dashboard - saving the session and exiting")
+                break
+            if recalibrate_requested:
+                recalibrate_requested = False
+                calibrating = True
+                calibration_start = None
+                calib_ear.clear()
+                calib_mar.clear()
+                calib_pitch.clear()
+                calib_yaw.clear()
+                eye_tracker.reset()
+                mouth_tracker.reset()
+                drowsiness.reset()
+                presence_hysteresis.reset()
+                obstruction_hysteresis.reset()
+                risk_engine.reset_pre_drive()
             # The preview window only updates every DISPLAY_EVERY_N_FRAMES
             # (waitKey() blocks on the compositor, ~24 ms measured on the Pi).
             display_due = config.DISPLAY_ENABLED and frame_count % config.DISPLAY_EVERY_N_FRAMES == 0
@@ -315,6 +378,14 @@ def main():
 
             # ---- Calibration phase ----
             if calibrating:
+                # Hand the dashboard its frame here - face dots only, before
+                # any text: the status text is for the local window, the
+                # dashboard shows those values as UI. (A copy when the local
+                # window also draws its text onto this frame.)
+                if show and face_found:
+                    face_mesh.draw(frame, drawable)
+                if stream_due:
+                    web.publish(frame.copy() if display_due else frame, now)
                 if face_found:
                     if calibration_start is None:
                         calibration_start = now
@@ -323,7 +394,7 @@ def main():
                     calib_pitch.append(pitch)
                     calib_yaw.append(yaw)
                     elapsed = now - calibration_start
-                    if show:
+                    if display_due:   # the dashboard shows its own calibration overlay
                         cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
                                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
@@ -335,11 +406,14 @@ def main():
                         drowsiness.set_mouth_baseline(baseline_mar)
                         head_pose_tracker.set_baseline(baseline_pitch, baseline_yaw)
                         calibrating = False
+                        # the update-rate window restarts with monitoring, so
+                        # calibration time doesn't read as a slow update rate
+                        risk_updates, risk_window_start = 0, time.monotonic()
                         calib_baseline = {"ear": baseline_ear, "mar": baseline_mar,
                                     "pitch": baseline_pitch, "yaw": baseline_yaw}
                         print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
-                elif show:
+                elif display_due:
                     cv2.putText(frame, "Waiting for face to calibrate...",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -349,9 +423,9 @@ def main():
                 # full HIGH alarm (see Risk.WAITING).
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
                 risk_last_t = None  # not classifying yet - see risk-rate block
-                if web.wants_status(now):
+                if recorder.wants_update(now):
                     health = alerts.health(now)
-                    web.set_status(dashboard_state(
+                    recorder.update(dashboard_state(
                         risk=Risk.WAITING, debug={"case": "CALIBRATING"},
                         messages=["Calibrating - look straight at the camera"],
                         presence=None, face_found=face_found, drowsy_state=None, drowsiness=drowsiness,
@@ -360,14 +434,10 @@ def main():
                         perf={"fps": _r(fps_display, 1), "stages_ms": last_stages},
                         thermal=last_thermal, sysinfo=last_sysinfo,
                         links={**health, "yolo": yolo.health(now)["state"]}, baseline=calib_baseline,
-                        calibrating=True,
+                        calibrating=True, paused=paused,
                         calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
                                         if calibration_start is not None else 0.0)), now)
 
-                if show and face_found:
-                    face_mesh.draw(frame, drawable)
-                if stream_due:
-                    web.publish(frame, now)
                 if display_due:
                     cv2.imshow("DriverGuardian", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
@@ -433,6 +503,10 @@ def main():
                     cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
                     cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
+            # Dashboard frame: face dots + detection boxes, no status text (see
+            # the calibration branch above for why).
+            if stream_due:
+                web.publish(frame.copy() if display_due else frame, now)
 
             # seatbelt_supported: the pre-drive gate can only demand a
             # confirmed belt when the loaded model actually has that class -
@@ -441,12 +515,17 @@ def main():
                 now, presence, drowsy_state, pose_state, yolo_state,
                 seatbelt_supported=yolo.using_finetuned,
             )
+            if paused:
+                # Paused from the dashboard: everything keeps running (video,
+                # detection) but nothing is classified or alerted; the ESP32
+                # gets WAITING, so the vehicle stays stopped.
+                risk, messages, debug = Risk.WAITING, ["Monitoring paused"], {"case": "PAUSED", "score": None}
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
-            if web.wants_status(now):
+            if recorder.wants_update(now):
                 health = alerts.health(now)
                 yh = yolo.health(now)
-                web.set_status(dashboard_state(
+                recorder.update(dashboard_state(
                     risk=risk, debug=debug, messages=messages, presence=presence, face_found=face_found,
                     drowsy_state=drowsy_state, drowsiness=drowsiness, ear=smoothed_ear, mar=smoothed_mar,
                     pose_state=pose_state, yolo_state=yolo_state, yolo=yolo,
@@ -454,10 +533,11 @@ def main():
                     perf={"fps": _r(fps_display, 1), "stages_ms": last_stages,
                           "rate_hz": last_rate_hz, "gap_window_ms": last_gap_window_ms,
                           "gap_session_ms": _r(risk_gap_session_max * 1000, 0),
+                          "updates_total": risk_updates_session,
                           "camera_fps": config.CAMERA_FPS},
                     thermal=last_thermal, sysinfo=last_sysinfo,
                     links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1)},
-                    baseline=calib_baseline), now)
+                    baseline=calib_baseline, paused=paused), now)
 
             if risk == Risk.WAITING:
                 risk_last_t = None
@@ -471,6 +551,7 @@ def main():
                     risk_gap_session_max = max(risk_gap_session_max, gap)
                 risk_last_t = t_class
                 risk_updates += 1
+                risk_updates_session += 1
                 if risk_log_writer is not None:
                     risk_log_writer.writerow([f"{t_class:.6f}", risk.name,
                                               debug.get("case", "NONE"), risk_segment])
@@ -568,8 +649,6 @@ def main():
                 log_file.flush()
 
             t_risk_draw = time.perf_counter()
-            if stream_due:
-                web.publish(frame, now)
             if display_due:
                 # Preview-only downscale - see config.DISPLAY_SCALE.
                 # Everything downstream of detection already ran on the
@@ -719,21 +798,15 @@ def main():
 
             if key == ord('q'):
                 break
-            elif key == ord('r') or web.take_command() == "recalibrate":
-                calibrating = True
-                calibration_start = None
-                calib_ear.clear()
-                calib_mar.clear()
-                calib_pitch.clear()
-                calib_yaw.clear()
-                eye_tracker.reset()
-                mouth_tracker.reset()
-                drowsiness.reset()
-                presence_hysteresis.reset()
-                obstruction_hysteresis.reset()
-                risk_engine.reset_pre_drive()
+            elif key == ord('r'):
+                recalibrate_requested = True   # applied at the top of the next loop
 
     finally:
+        recorder.end("app stopped")
+        if store is not None:
+            store.flush()
+            store.close()
+            print(f"Session saved to the history database: {config.SESSION_DB_PATH}")
         alerts.close()  # stop any alert still being spoken
         web.close()
         camera.release()

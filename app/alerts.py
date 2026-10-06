@@ -335,8 +335,14 @@ class AlertSystem:
             "voice": v.status,
             "voice_last": v.last_text,
             "voice_seq": v.seq,
+            "muted": v.muted,
             "voice_last_age": (now - v.last_at) if v.last_at is not None else None,
         }
+
+    def set_muted(self, muted: bool):
+        self._voice.muted = muted
+        if muted:
+            self._voice.close()   # stop anything still being spoken
 
     def close(self):
         self._voice.close()

@@ -2,8 +2,8 @@
 web_view.py
 -----------
 The monitoring dashboard: a web page served by the app itself, for watching
-the Pi remotely (a laptop, phone, or several testers at once) without
-screen sharing. Open http://<pi-hostname>.local:8080 (e.g. http://pi5.local:8080).
+and controlling the Pi remotely (a laptop, phone, or several testers at
+once) without screen sharing. Open http://<pi-hostname>.local:8080.
 
 Why not remote desktop (Pi Connect / VNC): those re-encode the Pi's whole
 desktop as video in software (the Pi 5 has no hardware video encoder), and
@@ -13,27 +13,34 @@ annotated frames as JPEGs (MJPEG), encoded only while someone is watching,
 plus small JSON updates.
 
 Endpoints
-    /                       the dashboard (static files in app/web/)
-    /stream.mjpg            live annotated video
-    /snapshot.jpg           latest frame
-    /api/state              current state (risk, driver signals, detections, health)
-    /api/history?since=T    time series sampled every WEB_HISTORY_INTERVAL_SEC
-    /api/events?since=ID    event log (risk changes, voice prompts, link changes...)
-    POST /api/recalibrate   restart driver calibration
+    /                               the dashboard (static files in app/web/)
+    /stream.mjpg, /snapshot.jpg     live video / latest frame
+    /api/state                      current state (risk, signals, health, session)
+    /api/history?since=T            live time series (last WEB_HISTORY_SEC)
+    /api/events?since=ID            live event log
+    /api/sessions                   saved sessions (history database)
+    /api/sessions/ID                one session: summary, events, timeline
+    /api/sessions/ID/samples.csv    its timeline as CSV
+    /api/sessions/ID/events.csv     its events as CSV
+    POST /api/control {action}      pause | resume | new_session | stop |
+                                    recalibrate | mute | unmute
+    POST /api/marker {text}         add a marker to the current session
+    POST /api/sessions/ID {label, notes}   rename / annotate a session
+    DELETE /api/sessions/ID         delete a saved session
 
-Threads here only move bytes and encode JPEGs (OpenCV releases the GIL
-while encoding); none of them ever fork() a process - the hazard behind
-this project's earlier freeze. The main loop only hands over a frame
-reference and a status dict a few times a second; it never waits on a viewer.
+Threads here only move bytes, read the database and encode JPEGs; none of
+them ever fork() a process - the hazard behind this project's earlier
+freeze. Commands are queued for the main loop, which applies them.
 """
 
+import csv
+import io
 import json
 import os
 import re
 import socket
 import threading
 import time
-from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -44,8 +51,7 @@ from app import config
 _WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 _CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
                   ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
-_RISK_ORDER = ["WAITING", "SAFE", "LOW", "MEDIUM", "HIGH"]
-_RISK_LEVEL = {"HIGH": "critical", "MEDIUM": "serious", "LOW": "warning", "SAFE": "good"}
+_ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute"}
 
 
 def _lan_address():
@@ -61,10 +67,10 @@ def _lan_address():
 
 
 class WebView:
-    def __init__(self):
+    def __init__(self, recorder, store=None):
+        self.recorder, self.store = recorder, store
         self.enabled = config.WEB_VIEW_ENABLED
         self._cond = threading.Condition()     # frame/jpeg hand-off and viewer count
-        self._data_lock = threading.Lock()     # state/history/events/session
         self._frame = None
         self._frame_seq = 0
         self._jpeg = None
@@ -72,22 +78,7 @@ class WebView:
         self._viewers = 0
         self._last_handoff = 0.0
         self._commands = []
-
-        self._state = {}
-        self._state_at = 0.0
-        self._history = deque(maxlen=int(config.WEB_HISTORY_SEC / config.WEB_HISTORY_INTERVAL_SEC))
-        self._last_sample = 0.0
-        self._events = deque(maxlen=300)
-        self._event_id = 0
-        self._started_mono = time.monotonic()
-        self._started_wall = time.time()
-        self._time_in = {r: 0.0 for r in _RISK_ORDER}
-        self._alerts = {}
-        self._prev = {}                        # previous values, for change detection
-        self._pending_risk = None              # (risk, case, since) - debounce for the log
-        self._logged_risk = None
-        self._last_status = None
-
+        self._cmd_lock = threading.Lock()
         if not self.enabled:
             return
         try:
@@ -102,20 +93,13 @@ class WebView:
         host = socket.gethostname().removesuffix(".local")
         print(f"[web] Dashboard: http://{host}.local:{config.WEB_VIEW_PORT}  "
               f"(or http://{_lan_address()}:{config.WEB_VIEW_PORT})")
-        self.log("system", "info", "Monitoring started")
 
-    # ------------------------------------------------------------------
-    # Called from the main loop - all instant
-    # ------------------------------------------------------------------
+    # ---- called from the main loop (all instant) ----
 
     def wants_frame(self, now: float) -> bool:
         """True when someone is watching and the next stream frame is due."""
         return (self.enabled and self._viewers > 0
                 and now - self._last_handoff >= 1.0 / config.WEB_VIEW_FPS)
-
-    def wants_status(self, now: float) -> bool:
-        return self.enabled and (self._last_status is None
-                                 or now - self._last_status >= config.WEB_STATUS_INTERVAL_SEC)
 
     def publish(self, frame, now: float):
         """Hand over the finished, annotated frame. The main loop never draws
@@ -126,132 +110,21 @@ class WebView:
             self._frame_seq += 1
             self._cond.notify_all()
 
-    def set_status(self, state: dict, now: float):
-        """Latest full state from the main loop (a few times a second)."""
-        if not self.enabled:
-            return
-        with self._data_lock:
-            if self._last_status is not None and self._prev.get("risk") in self._time_in:
-                self._time_in[self._prev["risk"]] += now - self._last_status
-            self._last_status = now
-            self._detect_events(state, now)
-            state["session"] = {
-                "started_ts": self._started_wall,
-                "uptime_s": now - self._started_mono,
-                "time_in": dict(self._time_in),
-                "alerts": dict(self._alerts),
-            }
-            self._state, self._state_at = state, now
-            if now - self._last_sample >= config.WEB_HISTORY_INTERVAL_SEC:
-                self._last_sample = now
-                eyes, mouth, head = state.get("eyes") or {}, state.get("mouth") or {}, state.get("head") or {}
-                if not state.get("face_found"):
-                    # no face: the app's placeholder EAR/MAR/pose aren't
-                    # measurements - leave a gap in the charts instead
-                    eyes, mouth, head = {"ear_thr": eyes.get("ear_thr")}, {"mar_thr": mouth.get("mar_thr")}, {}
-                self._history.append({
-                    "t": round(now, 3), "ts": time.time(),
-                    "risk": state.get("risk"), "case": state.get("case"),
-                    "ear": eyes.get("ear"), "ear_thr": eyes.get("ear_thr"),
-                    "mar": mouth.get("mar"), "mar_thr": mouth.get("mar_thr"),
-                    "pitch": head.get("pitch"), "yaw": head.get("yaw"),
-                    "fps": (state.get("perf") or {}).get("fps"),
-                })
+    def take_commands(self):
+        """Commands queued by the dashboard since the last call."""
+        with self._cmd_lock:
+            cmds, self._commands = self._commands, []
+        return cmds
 
-    def log(self, kind: str, level: str, title: str, detail: str = ""):
-        """Add an entry to the event log (kind: risk / voice / detect / system;
-        level: good / warning / serious / critical / info)."""
-        if not self.enabled:
-            return
-        with self._data_lock:
-            self._append_event(kind, level, title, detail)
-
-    def take_command(self):
-        """A command from the dashboard ('recalibrate'), or None."""
-        return self._commands.pop(0) if self._commands else None
+    @property
+    def viewers(self):
+        return self._viewers
 
     def close(self):
         if self.enabled:
             self._server.shutdown()
 
-    # ------------------------------------------------------------------
-    # Event detection (runs inside set_status, under _data_lock)
-    # ------------------------------------------------------------------
-
-    def _append_event(self, kind, level, title, detail="", ts=None):
-        self._event_id += 1
-        self._events.append({"id": self._event_id, "ts": ts or time.time(), "kind": kind,
-                             "level": level, "title": title, "detail": detail})
-
-    def _changed(self, key, value):
-        """(changed, old) - never 'changed' on the first observation."""
-        missing = key not in self._prev
-        old = self._prev.get(key)
-        self._prev[key] = value
-        return (not missing and old != value), old
-
-    def _detect_events(self, s, now):
-        risk, case = s.get("risk"), s.get("case")
-        self._prev["risk"] = risk
-
-        # A risk change is logged once it has held for 0.5 s, so a one-frame
-        # flicker doesn't flood the log.
-        if self._pending_risk is None or self._pending_risk[:2] != (risk, case):
-            self._pending_risk = (risk, case, now, time.time())
-        elif (now - self._pending_risk[2] >= 0.5 and self._logged_risk != (risk, case)
-              and not s.get("calibrating")):
-            self._logged_risk = (risk, case)
-            if risk == "WAITING":
-                title = "Waiting for seatbelt" if case == "PRE_DRIVE" else "Waiting"
-            else:
-                title = f"{risk.title()} risk"
-                if case not in ("NONE", None):
-                    title += " · " + case.replace("_", " ").lower()
-            # stamped with when the change began, not when it was confirmed
-            self._append_event("risk", _RISK_LEVEL.get(risk, "info"), title,
-                               " / ".join((s.get("messages") or [])[:2]), ts=self._pending_risk[3])
-            if risk in ("LOW", "MEDIUM", "HIGH") and case not in ("NONE", None):
-                self._alerts[case] = self._alerts.get(case, 0) + 1
-
-        links = s.get("links") or {}
-        changed, _ = self._changed("voice_seq", links.get("voice_seq"))
-        if changed and links.get("voice_last"):
-            self._append_event("voice", "info", "Spoken alert", f"“{links['voice_last']}”")
-        for key, label in (("esp32", "ESP32 link"), ("yolo", "Object detection")):
-            changed, old = self._changed(key, links.get(key))
-            if changed:
-                ok = links.get(key) in ("connected", "running")
-                self._append_event("system", "good" if ok else "warning",
-                                   f"{label} {links.get(key)}", f"was {old}")
-
-        changed, _ = self._changed("calibrating", bool(s.get("calibrating")))
-        if changed:
-            if s.get("calibrating"):
-                self._append_event("system", "info", "Calibration started",
-                                   "look straight at the camera, eyes open, mouth closed")
-            else:
-                b = s.get("baseline") or {}
-                self._append_event("system", "good", "Calibration complete",
-                                   f"EAR {b.get('ear', 0):.3f} · MAR {b.get('mar', 0):.3f}")
-
-        seatbelt = (s.get("objects") or {}).get("seatbelt")
-        changed, old = self._changed("seatbelt", seatbelt)
-        if changed and seatbelt in ("ON", "OFF"):
-            self._append_event("detect", "good" if seatbelt == "ON" else "warning",
-                               f"Seatbelt {seatbelt.lower()}", "")
-        presence = s.get("presence")
-        changed, _ = self._changed("presence", presence)
-        if changed and presence:
-            self._append_event("detect", "good" if presence == "DRIVER_PRESENT" else "critical",
-                               presence.replace("_", " ").capitalize(), "")
-        throttled = (s.get("system") or {}).get("throttled") or []
-        changed, _ = self._changed("throttled", bool(throttled))
-        if changed and throttled:
-            self._append_event("system", "critical", "CPU throttling", ", ".join(throttled))
-
-    # ------------------------------------------------------------------
-    # Background threads
-    # ------------------------------------------------------------------
+    # ---- background threads ----
 
     def _encoder(self):
         seen = 0
@@ -276,79 +149,157 @@ class WebView:
             def log_message(self, *args):   # keep the console quiet
                 pass
 
-            def _send(self, code, ctype, body):
+            def _send(self, code, ctype, body, extra_headers=None):
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
+                for k, v in (extra_headers or {}).items():
+                    self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(body)
 
-            def _json(self, obj):
-                self._send(200, "application/json", json.dumps(obj, separators=(",", ":")).encode())
+            def _json(self, obj, code=200):
+                self._send(code, "application/json", json.dumps(obj, separators=(",", ":")).encode())
 
+            def _error(self, code, msg):
+                self._json({"ok": False, "error": msg}, code)
+
+            def _body(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > 8192:
+                    raise ValueError("request too large")
+                raw = self.rfile.read(n) if n else b""
+                return json.loads(raw or b"{}")
+
+            def _trusted(self):
+                # The custom header makes browsers preflight cross-site requests,
+                # which this server never approves - so another website can't
+                # trigger actions on the Pi through a visitor's browser.
+                return self.headers.get("X-DriverGuardian") == "1"
+
+            # ---------------------------------------------------- GET
             def do_GET(self):
                 url = urlparse(self.path)
                 q = parse_qs(url.query)
                 path = url.path
                 try:
                     if path in ("/", "/index.html"):
-                        self._static("index.html")
-                    elif path.startswith("/static/"):
-                        self._static(path[len("/static/"):])
-                    elif path == "/api/state":
-                        with view._data_lock:
-                            state, at = dict(view._state), view._state_at
+                        return self._static("index.html")
+                    if path.startswith("/static/"):
+                        return self._static(path[len("/static/"):])
+                    if path == "/api/state":
+                        state, at = view.recorder.snapshot()
                         state["age_sec"] = (time.monotonic() - at) if at else None
                         state["viewers"] = view._viewers
-                        self._json(state)
-                    elif path == "/api/history":
-                        since = float(q.get("since", ["-1"])[0])
-                        with view._data_lock:
-                            samples = [p for p in view._history if p["t"] > since]
-                        self._json({"samples": samples, "window_sec": config.WEB_HISTORY_SEC,
-                                    "now": time.monotonic()})
-                    elif path == "/api/events":
-                        since = int(q.get("since", ["0"])[0])
-                        with view._data_lock:
-                            events = [e for e in view._events if e["id"] > since]
-                        self._json({"events": events})
-                    elif path == "/snapshot.jpg":
+                        state["history_keep"] = config.SESSION_HISTORY_KEEP
+                        return self._json(state)
+                    if path == "/api/history":
+                        return self._json({"samples": view.recorder.history_since(float(q.get("since", ["-1"])[0])),
+                                           "window_sec": config.WEB_HISTORY_SEC})
+                    if path == "/api/events":
+                        return self._json({"events": view.recorder.events_since(int(q.get("since", ["0"])[0]))})
+                    if path == "/snapshot.jpg":
                         if view._jpeg is None:
-                            self._send(503, "text/plain", b"no frame yet - open the dashboard first")
-                        else:
-                            self._send(200, "image/jpeg", view._jpeg)
-                    elif path == "/stream.mjpg":
-                        self._stream()
-                    else:
-                        self._send(404, "text/plain", b"not found")
+                            return self._error(503, "no frame yet - open the dashboard first")
+                        return self._send(200, "image/jpeg", view._jpeg)
+                    if path == "/stream.mjpg":
+                        return self._stream()
+                    m = re.fullmatch(r"/api/sessions(?:/(\d+)(?:/(samples|events)\.csv)?)?", path)
+                    if m:
+                        return self._sessions_get(m.group(1), m.group(2))
+                    self._error(404, "not found")
                 except ValueError:
-                    self._send(400, "text/plain", b"bad request")
+                    self._error(400, "bad request")
 
+            def _sessions_get(self, sid, csv_kind):
+                if view.store is None:
+                    return self._error(503, "session history is disabled")
+                current = view.recorder.session_id
+                if sid is None:
+                    rows = view.store.list_sessions()
+                    for r in rows:
+                        r["status"] = "live" if r["id"] == current else "complete" if r["ended_ts"] else "interrupted"
+                        if r["id"] == current:
+                            r["summary"] = view.recorder.live_summary()
+                    return self._json({"sessions": rows, "keep": config.SESSION_HISTORY_KEEP})
+                s = view.store.get_session(int(sid))
+                if s is None:
+                    return self._error(404, "session not found")
+                s["status"] = "live" if s["id"] == current else "complete" if s["ended_ts"] else "interrupted"
+                if s["id"] == current:
+                    s["summary"] = view.recorder.live_summary()
+                if csv_kind is None:
+                    return self._json(s)
+                rows = s["samples"] if csv_kind == "samples" else s["events"]
+                buf = io.StringIO()
+                if rows:
+                    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+                    w.writeheader()
+                    for r in rows:
+                        r = dict(r)
+                        r["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"]))
+                        w.writerow({k: r[k] for k in rows[0].keys()} | ({"ts": r["time"]}))
+                safe = re.sub(r"[^\w.-]+", "_", s["label"] or f"session_{sid}")
+                self._send(200, "text/csv; charset=utf-8", buf.getvalue().encode(),
+                           {"Content-Disposition": f'attachment; filename="{safe}_{csv_kind}.csv"'})
+
+            # ---------------------------------------------------- POST / DELETE
             def do_POST(self):
-                # The custom header makes browsers preflight cross-site requests,
-                # which this server never approves - so another website can't
-                # trigger actions on the Pi through a visitor's browser.
-                if self.headers.get("X-DriverGuardian") != "1":
-                    self._send(403, "text/plain", b"forbidden")
-                elif urlparse(self.path).path == "/api/recalibrate":
-                    view._commands.append("recalibrate")
-                    view.log("system", "info", "Recalibration requested", "from the dashboard")
-                    self._json({"ok": True})
-                else:
-                    self._send(404, "text/plain", b"not found")
+                if not self._trusted():
+                    return self._error(403, "forbidden")
+                path = urlparse(self.path).path
+                try:
+                    body = self._body()
+                except (ValueError, json.JSONDecodeError):
+                    return self._error(400, "bad request")
+                if path == "/api/control":
+                    action = body.get("action")
+                    if action not in _ACTIONS:
+                        return self._error(400, "unknown action")
+                    with view._cmd_lock:
+                        view._commands.append((action, body))
+                    return self._json({"ok": True})
+                if path == "/api/marker":
+                    view.recorder.mark(str(body.get("text") or "Marker"))
+                    return self._json({"ok": True})
+                m = re.fullmatch(r"/api/sessions/(\d+)", path)
+                if m and view.store is not None:
+                    sid = int(m.group(1))
+                    label, notes = body.get("label"), body.get("notes")
+                    if sid == view.recorder.session_id and label:
+                        view.recorder.set_label(str(label))
+                    fields = {}
+                    if label and sid != view.recorder.session_id:
+                        fields["label"] = str(label).strip()[:120]
+                    if notes is not None:
+                        fields["notes"] = str(notes)[:2000]
+                    if fields:
+                        view.store.update_session(sid, **fields)
+                    return self._json({"ok": True})
+                self._error(404, "not found")
 
+            def do_DELETE(self):
+                if not self._trusted():
+                    return self._error(403, "forbidden")
+                m = re.fullmatch(r"/api/sessions/(\d+)", urlparse(self.path).path)
+                if not m or view.store is None:
+                    return self._error(404, "not found")
+                if int(m.group(1)) == view.recorder.session_id:
+                    return self._error(409, "this session is still running - end it first")
+                view.store.delete_session(int(m.group(1)))
+                self._json({"ok": True})
+
+            # ---------------------------------------------------- helpers
             def _static(self, name):
                 ext = os.path.splitext(name)[1]
                 if not re.fullmatch(r"[\w.-]+", name) or ext not in _CONTENT_TYPES:
-                    self._send(404, "text/plain", b"not found")
-                    return
+                    return self._error(404, "not found")
                 try:
                     with open(os.path.join(_WEB_DIR, name), "rb") as f:
                         body = f.read()
                 except OSError:
-                    self._send(404, "text/plain", b"not found")
-                    return
+                    return self._error(404, "not found")
                 self._send(200, _CONTENT_TYPES[ext], body)
 
             def _stream(self):

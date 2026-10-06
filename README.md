@@ -230,20 +230,32 @@ The app serves its own live view. On any device on the same network open:
 http://pi5.local:8080        (use your Pi's hostname, or the IP printed at startup)
 ```
 
-The monitoring dashboard shows:
+The monitoring dashboard has two tabs.
 
-- the live camera view (face mesh + object detections), full-screen capable
-- the current risk level and reason, and how long it has lasted
+**Live**
+- session bar: session name (click to rename), state (Monitoring / Paused /
+  Calibrating) and controls: **Pause/Resume** (alerts off, ESP32 held in
+  WAITING), **Mark** (note a moment, e.g. "phone test starts"), **Recalibrate**,
+  **Mute** (voice), **Snapshot**, **New session** (saves this one, starts the
+  next with calibration) and **Stop** (saves the session and exits the app)
+- live camera view (face mesh + detections), full-screen capable
+- risk level with reason and duration, and the event log beside it
 - live driver signals: eyes, blinks, mouth/yawning, head direction, phone,
-  eating/drinking, smoking, seatbelt, driver presence and lighting
-- trends for the last 1/5/10 minutes: risk timeline, eye openness (EAR),
-  mouth opening (MAR) and head pose - hover or use the arrow keys to read
-  values, or switch any chart to a table
+  eating/drinking, smoking, seatbelt, driver presence, lighting
+- trends (1/5/10 min): risk timeline with marker flags, eye openness (EAR),
+  mouth opening (MAR), head pose - hover or arrow keys to read values, or
+  switch any chart to a table
 - requirement checks (update rate >= 12 Hz, longest gap <= 1 s), time per
-  frame, CPU temperature/throttling, load and memory, YOLO / ESP32 / voice status
-- session summary (time at each risk level, alerts by type) and an event log
-  (risk changes, spoken alerts, detections, link changes)
-- **Recalibrate** and **Snapshot** buttons, light/dark theme
+  frame, CPU temperature/throttling, load, memory, YOLO / ESP32 / voice status
+- optional browser sound when risk turns high; shortcuts P (pause), M (mark),
+  F (full screen)
+
+**History** - every session is saved to `data/driverguardian.db` (SQLite):
+summary (time at each risk level, alerts by type, update rate, longest gap,
+FPS, calibration baseline), the full event log and a once-per-second
+timeline. Sessions can be reviewed, renamed, annotated, exported as CSV and
+deleted. Only the newest `SESSION_HISTORY_KEEP` (default 20) are kept; a
+session cut short by a crash is kept and marked "interrupted".
 
 Several people can watch at once; video is only encoded while someone is watching.
 Everything is served by the app itself - no internet connection needed.

@@ -76,6 +76,15 @@ WEB_STATUS_INTERVAL_SEC = 0.2   # how often the main loop hands the dashboard a 
 WEB_HISTORY_INTERVAL_SEC = 0.25 # chart sample spacing (4 per second)
 WEB_HISTORY_SEC = 600           # chart history kept in memory (10 minutes)
 
+# ---- Session history (app/storage.py - SQLite, nothing to install) ----
+# Every monitoring session is saved (summary, events, 1 Hz timeline) and can
+# be reviewed, renamed, exported or deleted in the dashboard's History tab.
+# Only the newest SESSION_HISTORY_KEEP sessions are kept (~1-2 MB per hour).
+SESSION_HISTORY_ENABLED = True
+SESSION_HISTORY_KEEP = 20
+DATA_DIR = os.path.join(BASE_DIR, "data")
+SESSION_DB_PATH = os.path.join(DATA_DIR, "driverguardian.db")
+
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
 APP_NICE = 10
