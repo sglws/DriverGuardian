@@ -209,6 +209,35 @@ itself notices the silence after `BT_TIMEOUT_MS` and fails safe on its own
 (flowchart Case 8: "Bluetooth Failure -> HIGH -> Safe stop mode") - it
 doesn't wait around for a Pi that may be the thing that's broken.
 
+## Arduino Uno (cabin air sensors, USB)
+
+An Arduino Uno on a Pi USB port reads two gas sensors. Their values are shown
+on the dashboard (Readings, the signal chain, the "Cabin air" chart) and
+recorded with every session. They do **not** change the risk level.
+
+| Sensor | Measures | Uno pin | Power |
+|---|---|---|---|
+| MQ-3 | alcohol | AO -> A0 | VCC -> 5V, GND -> GND |
+| MQ-2 | smoke / LPG / gas | AO -> A1 | VCC -> 5V, GND -> GND |
+
+1. Flash `arduino/DriverGuardian_Uno/DriverGuardian_Uno.ino` with the Arduino IDE
+   (board: Arduino Uno).
+2. Plug the Uno into the Pi with its USB cable (the cable also powers it; the
+   two heaters draw ~300 mA - use a powered hub if the Uno resets).
+3. `pip install -r requirements.txt` (adds `pyserial`), then run the app. The
+   Pi finds the Uno on its own; the dashboard's "Cabin sensors" shows
+   **Warming up** for 2 minutes, then the readings relative to clean air.
+
+The sensors need their heaters warm before readings mean anything (2 minutes
+after power-on, and 24-48 h of burn-in the first time a new sensor is used).
+The values are raw, not ppm - a concentration needs calibration against a
+known gas - so they are shown relative to the clean-air reading taken right
+after warm-up: start the car in clean air.
+
+If the ESP32 is also plugged into the Pi by USB, set `ARDUINO_PORT` in
+`app/config.py` to the Uno's fixed path (`ls /dev/serial/by-id/`), so the
+search never opens the ESP32's port. `DG_ARDUINO=0` turns the link off.
+
 ## Running
 
 ```bash
@@ -230,7 +259,11 @@ The app serves its own live view. On any device on the same network open:
 http://pi5.local:8080        (use your Pi's hostname, or the IP printed at startup)
 ```
 
-The monitoring dashboard has two tabs.
+The monitoring dashboard has two tabs. Watching needs nothing; every control
+(pause, stop, new session, recalibrate, markers, tests, renaming, deleting)
+asks for the **dashboard PIN** once per browser - `DASHBOARD_PIN` in
+`app/config.py` (default `1234`, change it, or `DG_PIN=...` for one run).
+Five wrong PINs lock that device out for a minute.
 
 **Live**
 - session bar: session name (click to rename), state (Monitoring / Paused /
@@ -239,22 +272,54 @@ The monitoring dashboard has two tabs.
   **Mute** (voice), **Snapshot**, **New session** (saves this one, starts the
   next with calibration) and **Stop** (saves the session and exits the app)
 - live camera view (face mesh + detections), full-screen capable
+- **Test** runs a requirement test from the browser, with spoken and on-video
+  instructions: eye-state and yawn accuracy (>= 90 %) or object detection
+  delay (<= 1 s). No alerts and the car stays stopped while it runs; the
+  result is saved in the session (same method as the tools/ scripts)
+- the camera view, with the **risk gauge** beside it (Safe to High, with a
+  needle) above the event log, and a row of **warning lamps** under the video -
+  eyes closed, yawning, head lean, looking away, phone, eating/drinking,
+  smoking, seatbelt off, driver absent, camera blocked - lit amber or red like
+  a car's tell-tales; the page's ambient light takes the colour of the risk
+- night design by default; the theme button switches to daylight
+- the **signal chain**: camera, face mesh, object detection, risk engine,
+  voice and vehicle, each with its live health (FPS, ms, Hz, link state)
+- **Readings**: every measured value (EAR, MAR, head angles, lighting...)
+- **Vehicle** panel: speed, PWM, front/rear distance, IR edge sensors,
+  emergency stop and pull-over countdown, from the ESP32's telemetry
+  (needs the current firmware in esp32/DriverGuardian_ESP32)
 - risk level with reason and duration, and the event log beside it
 - live driver signals: eyes, blinks, mouth/yawning, head direction, phone,
   eating/drinking, smoking, seatbelt, driver presence, lighting
 - trends (1/5/10 min): risk timeline with marker flags, eye openness (EAR),
-  mouth opening (MAR), head pose - hover or arrow keys to read values, or
-  switch any chart to a table
-- requirement checks (update rate >= 12 Hz, longest gap <= 1 s), time per
+  mouth opening (MAR), head pose - hover or arrow keys to read values (all
+  charts follow the same moment), click the risk timeline to find its
+  events, or switch any chart to a table
+- **What the detectors saw**: one row per detector (eyes closed, yawning,
+  head lean, looking away, phone, eating/drinking, smoking, seatbelt off,
+  driver absent, camera blocked), shaded while it was active - shows why
+  the risk level rose
+- **Fatigue**: PERCLOS (share of the last minute with the eyes closed;
+  drowsy at 15 % and above), blinks per minute, and a summary (peak
+  PERCLOS, yawns, longest eye closure)
+- **Reaction to alerts** (History and the report): every alert as a dot -
+  how long until it was spoken, and how long after the voice the driver
+  corrected it - with medians
+- event log opens on "Important" (warnings, alerts, markers, spoken alerts, tests)
+- a **Diagnostics** drawer (closed by default, with a one-line summary):
+  requirement checks (update rate >= 12 Hz, longest gap <= 1 s), time per
   frame, CPU temperature/throttling, load, memory, YOLO / ESP32 / voice status
 - optional browser sound when risk turns high; shortcuts P (pause), M (mark),
-  F (full screen)
+  T (test), F (full screen), K (presentation)
+- **Presentation mode** (screen icon, or `#kiosk` in the address): full
+  screen video with a giant risk level - for demos and a screen in the car
 
 **History** - every session is saved to `data/driverguardian.db` (SQLite):
 summary (time at each risk level, alerts by type, update rate, longest gap,
 FPS, calibration baseline), the full event log and a once-per-second
 timeline. Sessions can be reviewed, renamed, annotated, exported as CSV and
-deleted. Only the newest `SESSION_HISTORY_KEEP` (default 20) are kept; a
+deleted, opened as a printable **Report** (Print / Save as PDF) and
+**Compared** side by side with another session. Only the newest `SESSION_HISTORY_KEEP` (default 20) are kept; a
 session cut short by a crash is kept and marked "interrupted".
 
 Several people can watch at once; video is only encoded while someone is watching.

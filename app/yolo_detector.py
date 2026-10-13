@@ -392,6 +392,7 @@ class YoloProcess:
         self._busy = False
         self._restart_at = 0.0
         self._last_result_at = None
+        self._raw = None
         self._fallback = None
         if self.available and sys.platform == "win32":
             self._fallback = YoloWorker(YoloDetector(), DetectionConfirmer())
@@ -439,6 +440,9 @@ class YoloProcess:
                 msg = self._conn.recv()
                 if msg.get("type") == "ready":
                     self._busy = False
+                elif msg.get("type") == "raw":
+                    self._raw = msg["result"]
+                    self._busy = False
                 else:
                     self._latest = msg
                     self._busy = False
@@ -466,6 +470,31 @@ class YoloProcess:
             return False
         self._busy = True
         return True
+
+    def submit_raw(self, frame, mouth_roi) -> bool:
+        """One unconfirmed detection on `frame` (already small - sent as is).
+        Never blocks; the answer arrives via take_raw(). Returns True if sent."""
+        if self._fallback is not None:          # Windows: run it here (blocks briefly)
+            self._raw = self._fallback._yolo.detect(frame, mouth_roi=mouth_roi)
+            return True
+        self._drain()
+        if self._conn is None or self._busy:
+            return False
+        try:
+            self._conn.send(("raw", frame, mouth_roi))
+        except (OSError, EOFError):
+            self._died()
+            return False
+        self._raw = None
+        self._busy = True
+        return True
+
+    def take_raw(self):
+        """The answer to submit_raw(), once (None until it arrives)."""
+        if self._fallback is None:
+            self._drain()
+        raw, self._raw = self._raw, None
+        return raw
 
     def health(self, now: float) -> dict:
         """Process status for the dashboard."""

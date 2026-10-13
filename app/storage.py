@@ -9,7 +9,8 @@ Session history database (SQLite - part of Python, nothing to install).
                 calibration baseline, performance / requirement checks)
       events    the session's event log (risk changes, spoken alerts,
                 detections, markers, system events)
-      samples   a once-per-second timeline (risk, case, EAR, MAR, head pose, FPS)
+      samples   a once-per-second timeline (risk, case, EAR, MAR, head pose, FPS,
+                which detectors were active, PERCLOS, blink and yawn counters)
 
 Writes never block the monitoring loop: they go onto a queue and a single
 background thread commits them in batches (WAL mode, so the dashboard can
@@ -45,12 +46,24 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE TABLE IF NOT EXISTS samples (
     session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
     ts REAL NOT NULL, risk TEXT, "case" TEXT,
-    ear REAL, ear_thr REAL, mar REAL, mar_thr REAL, pitch REAL, yaw REAL, fps REAL
+    ear REAL, ear_thr REAL, mar REAL, mar_thr REAL, pitch REAL, yaw REAL, fps REAL,
+    flags INTEGER, perclos REAL, blinks INTEGER, yawns INTEGER,
+    mq3 INTEGER, mq2 INTEGER, mq3_rel REAL, mq2_rel REAL
 );
 CREATE INDEX IF NOT EXISTS events_by_session ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS samples_by_session ON samples(session_id, ts);
 """
-SAMPLE_FIELDS = ("ts", "risk", "case", "ear", "ear_thr", "mar", "mar_thr", "pitch", "yaw", "fps")
+SAMPLE_FIELDS = ("ts", "risk", "case", "ear", "ear_thr", "mar", "mar_thr", "pitch", "yaw", "fps",
+                 "flags", "perclos", "blinks", "yawns", "mq3", "mq2", "mq3_rel", "mq2_rel")
+# columns added after the first release - added to an older database on start
+_ADDED_COLUMNS = {"flags": "INTEGER", "perclos": "REAL", "blinks": "INTEGER", "yawns": "INTEGER",
+                  "mq3": "INTEGER", "mq2": "INTEGER", "mq3_rel": "REAL", "mq2_rel": "REAL"}
+
+# Bits of samples.flags: which detectors were active at that moment.
+FLAG_BITS = {
+    "eyes_closed": 1, "yawning": 2, "looking_away": 4, "head_lean": 8, "phone": 16,
+    "eating_drinking": 32, "smoking": 64, "seatbelt_off": 128, "driver_absent": 256, "camera_blocked": 512,
+}
 
 
 class SessionStore:
@@ -61,6 +74,10 @@ class SessionStore:
         self._lock = threading.Lock()           # guards the writer connection
         self._db = self._connect()
         self._db.executescript(_SCHEMA)
+        have = {r["name"] for r in self._db.execute("PRAGMA table_info(samples)")}
+        for col, kind in _ADDED_COLUMNS.items():
+            if col not in have:
+                self._db.execute(f"ALTER TABLE samples ADD COLUMN {col} {kind}")
         self._db.commit()
         self._prune()
         self._queue = queue.Queue()

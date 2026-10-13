@@ -67,6 +67,10 @@ DISPLAY_ENABLED = not sys.platform.startswith("linux")
 # (e.g. http://pi5.local:8080). Frames are only encoded while someone is
 # watching, so it costs nothing otherwise.
 WEB_VIEW_ENABLED = True
+# PIN for the dashboard's controls (pause, stop, new session, recalibrate,
+# markers, tests, renaming, deleting). Watching needs no PIN. Each browser
+# asks once and remembers it. Empty = no PIN. CHANGE IT before a demo.
+DASHBOARD_PIN = "1234"
 WEB_VIEW_HOST = "0.0.0.0"       # all network interfaces; "127.0.0.1" = this machine only
 WEB_VIEW_PORT = 8080
 WEB_VIEW_FPS = 10               # stream frame rate (detection still runs at full rate)
@@ -291,7 +295,7 @@ YOLO_CONF_THRESHOLD = 0.20
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.25,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.23,     # already working well at this level - don't disturb
+    "seatbelt": 0.37,     # already working well at this level - don't disturb
     "cigarette": 0.35,    # same as seatbelt - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
@@ -462,6 +466,17 @@ ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing d
                                      # (a single slow send is often just a transient hiccup, not a
                                      # real disconnect - see Esp32Link.send() in alerts.py)
 
+# Arduino Uno with the cabin air sensors (MQ-3 alcohol, MQ-2 smoke/gas) on a
+# USB cable - sketch in arduino/DriverGuardian_Uno, link in app/arduino.py.
+# Shown on the dashboard and recorded only; it does not change the risk.
+ARDUINO_ENABLED = True
+# "auto" searches Arduino / CH340 USB ports for the Uno. If the ESP32 is also
+# on a Pi USB port, give the Uno's fixed path instead, e.g.
+# "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_...-if00" (ls /dev/serial/by-id/)
+ARDUINO_PORT = "auto"
+ARDUINO_BAUD = 115200
+ARDUINO_WARMUP_SEC = 120   # must match WARMUP_MS in the sketch
+
 
 # --------------------------------------------------------------------------
 # Quick experiments without editing this file - environment variables
@@ -478,8 +493,11 @@ _ENV_OVERRIDES = {
     "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
     "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
     "DG_ESP32": ("ESP32_LINK_ENABLED", bool),
+    "DG_ARDUINO": ("ARDUINO_ENABLED", bool),
+    "DG_ARDUINO_PORT": ("ARDUINO_PORT", str),
     "DG_LOG": ("CONSOLE_LOG_ENABLED", bool),
     "DG_RISK_LOG": ("RISK_UPDATE_LOG", bool),
+    "DG_PIN": ("DASHBOARD_PIN", str),
     "DG_WEB": ("WEB_VIEW_ENABLED", bool),
     "DG_WEB_FPS": ("WEB_VIEW_FPS", int),
     "DG_WEB_WIDTH": ("WEB_VIEW_WIDTH", int),
@@ -492,4 +510,5 @@ for _var, (_name, _type) in _ENV_OVERRIDES.items():
         if _name == "YOLO_USE_16X9_MODEL" and globals()[_name]:
             YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_384x640_ncnn_model")
             YOLO_IMG_SIZE = (384, 640)
-        print(f"[config] {_name} = {globals()[_name]!r}  (from {_var})")
+        _shown = "(set)" if _name == "DASHBOARD_PIN" else repr(globals()[_name])
+        print(f"[config] {_name} = {_shown}  (from {_var})")

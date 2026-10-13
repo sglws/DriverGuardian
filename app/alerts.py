@@ -9,6 +9,10 @@ Wire protocol (newline-terminated ASCII, matches the ESP32 sketch):
     RISK,CASE\n
 e.g. "HIGH,SLEEP\n", "MEDIUM,SEATBELT\n", "LOW,PHONE\n", "SAFE,NONE\n"
 
+The ESP32 answers on the same link with telemetry for the dashboard
+(display only - nothing on the Pi depends on it):
+    TEL,risk,leftPWM,rightPWM,basePWM,frontCm,rearCm,irFront,irRear,estop,linkFailed,pulloverMs\n
+
 This is sent on a fixed interval (ESP32_SEND_INTERVAL_SEC), not just on
 change, so it doubles as a heartbeat: the ESP32 firmware treats a gap
 longer than its own timeout as a Bluetooth link failure and fails safe
@@ -100,6 +104,8 @@ class Esp32Link:
         self._deadline = 0.0
         self._proc = None
         self._pending = None
+        self._rx = b""
+        self.telemetry, self.telemetry_at = None, None
 
     def _prime_start(self, now):
         """A cold raw RFCOMM connect() to this ESP32 reliably fails with
@@ -248,6 +254,28 @@ class Esp32Link:
             return "unsupported"
         return "connected" if self._sock is not None else "searching"
 
+    def poll_rx(self, now: float):
+        """Read whatever telemetry the ESP32 has sent. Never blocks."""
+        sock = self._sock
+        if sock is None:
+            return
+        try:
+            while True:
+                chunk = sock.recv(4096)
+                if not chunk:
+                    return          # closed by the ESP32: send() notices and reconnects
+                self._rx += chunk
+        except (BlockingIOError, InterruptedError):
+            pass
+        except OSError:
+            return
+        *lines, self._rx = self._rx.split(b"\n")
+        self._rx = self._rx[-256:]
+        for raw in lines[-5:]:
+            t = _parse_telemetry(raw)
+            if t is not None:
+                self.telemetry, self.telemetry_at = t, now
+
     def send(self, risk_name: str, case: str):
         line = f"{risk_name},{case}\n"
         sock = self._ensure_open()
@@ -299,6 +327,28 @@ class Esp32Link:
                       f"{config.ESP32_SEND_FAILURE_TOLERANCE}, not reconnecting yet): {e}")
 
 
+def _parse_telemetry(raw: bytes):
+    parts = raw.decode("ascii", errors="replace").strip().split(",")
+    if len(parts) != 12 or parts[0] != "TEL":
+        return None
+    try:
+        left, right, base = int(parts[2]), int(parts[3]), int(parts[4])
+        front, rear = float(parts[5]), float(parts[6])
+        ir_front, ir_rear, estop, link_failed = (int(v) for v in parts[7:11])
+        pullover_ms = int(parts[11])
+    except ValueError:
+        return None
+    dist = lambda d: None if d >= 900 else round(d, 1)   # 999 = nothing in range
+    return {
+        "risk": parts[1], "left_pwm": left, "right_pwm": right, "base_pwm": base,
+        "speed_pct": round(100 * (left + right) / (2 * base)) if base else None,
+        "front_cm": dist(front), "rear_cm": dist(rear),
+        "ir_front": bool(ir_front), "ir_rear": bool(ir_rear),
+        "estop": {0: None, 1: "obstacle", 2: "edge"}.get(estop, "unknown"),
+        "link_failed": bool(link_failed), "pullover_s": round(pullover_ms / 1000, 1),
+    }
+
+
 class AlertSystem:
     """Routes each frame's risk decision to its outputs: spoken alerts
     (app/voice.py - paced so it stays calm) and the ESP32 over Bluetooth,
@@ -320,6 +370,7 @@ class AlertSystem:
         self._last_risk = risk
 
         self._voice.update(risk, case, now)
+        self._esp32.poll_rx(now)
 
         # The ESP32 gets every risk tier, including SAFE - it needs the
         # continuous stream to tell "still SAFE" apart from "link down".
@@ -337,7 +388,20 @@ class AlertSystem:
             "voice_seq": v.seq,
             "muted": v.muted,
             "voice_last_age": (now - v.last_at) if v.last_at is not None else None,
+            "vehicle": self.vehicle(now),
         }
+
+    def vehicle(self, now: float):
+        """Latest ESP32 telemetry, or None if there is none from the last 2 s
+        (not connected, or firmware without telemetry)."""
+        e = self._esp32
+        if e.telemetry is None or e.status != "connected" or now - e.telemetry_at > 2.0:
+            return None
+        return {**e.telemetry, "age_s": round(now - e.telemetry_at, 2)}
+
+    def say(self, key: str, now: float):
+        """Speak a test instruction (see voice.TEST_PROMPTS)."""
+        self._voice.say(key, now)
 
     def set_muted(self, muted: bool):
         self._voice.muted = muted

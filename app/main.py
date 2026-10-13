@@ -91,6 +91,8 @@ from app.alerts import AlertSystem
 from app.web_view import WebView
 from app.storage import SessionStore
 from app.session import SessionRecorder
+from app.testing import TestController
+from app.arduino import UnoLink
 
 RISK_COLORS = {
     Risk.WAITING: (200, 200, 200),
@@ -196,8 +198,20 @@ def main():
     recorder = SessionRecorder(store)
     recorder.start()
     web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
+    tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
+    uno = UnoLink()                          # cabin air sensors on USB (display/record only)
+    reported_test = None
     paused = False
     recalibrate_requested = False
+
+    def sync_tests():
+        """Test events and finished results -> the session."""
+        nonlocal reported_test
+        for ev in tests.take_events():
+            recorder.log(*ev)
+        if tests.result is not None and tests.result is not reported_test:
+            reported_test = tests.result
+            recorder.add_test(tests.result)
 
     # Symmetric debounce: presence loss needs NO_FACE_GRACE_SEC to escalate
     # and PRESENCE_RECOVER_SEC of a confirmed face to clear. Obstruction
@@ -273,7 +287,7 @@ def main():
         while True:
             t_loop_start = time.perf_counter()
             frame_count += 1
-
+            uno.poll(time.monotonic())   # never blocks
             # ---- Commands from the dashboard. Applied at the top of the loop
             # so they also work during calibration. ----
             stop_requested = False
@@ -282,6 +296,7 @@ def main():
                     stop_requested = True
                 elif action == "pause" and not paused:
                     paused = True
+                    tests.stop(time.monotonic(), "monitoring paused")
                 elif action == "resume" and paused:
                     paused = False
                     risk_updates, risk_window_start = 0, time.monotonic()
@@ -295,7 +310,21 @@ def main():
                 elif action == "recalibrate":
                     recalibrate_requested = True
                     recorder.log("system", "info", "Recalibration requested", "from the dashboard")
+                elif action == "test_start":
+                    err = tests.start(body, time.monotonic(), yolo_available=yolo.available)
+                    if err:
+                        recorder.log("test", "warning", "Test not started", err)
+                    else:
+                        if paused:
+                            paused = False
+                            risk_updates, risk_window_start = 0, time.monotonic()
+                        if tests.needs_calibration:
+                            recalibrate_requested = True
+                elif action == "test_stop":
+                    tests.stop(time.monotonic())
                 elif action == "new_session":
+                    tests.stop(time.monotonic(), "new session started")
+                    sync_tests()
                     recorder.end("new session started from the dashboard")
                     recorder.start(str(body.get("label") or ""))
                     risk_gap_session_max = 0.0
@@ -303,6 +332,8 @@ def main():
                     paused = False
                     recalibrate_requested = True
             if stop_requested:
+                tests.stop(time.monotonic(), "app stopped")
+                sync_tests()
                 print("[web] Stop requested from the dashboard - saving the session and exiting")
                 break
             if recalibrate_requested:
@@ -423,9 +454,12 @@ def main():
                 # full HIGH alarm (see Risk.WAITING).
                 alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
                 risk_last_t = None  # not classifying yet - see risk-rate block
+                if tests.active and not tests.needs_calibration:
+                    tests.stop(now, "recalibration started")
+                sync_tests()
                 if recorder.wants_update(now):
                     health = alerts.health(now)
-                    recorder.update(dashboard_state(
+                    recorder.update(dict(test=tests.status(now), cabin=uno.state(now), **dashboard_state(
                         risk=Risk.WAITING, debug={"case": "CALIBRATING"},
                         messages=["Calibrating - look straight at the camera"],
                         presence=None, face_found=face_found, drowsy_state=None, drowsiness=drowsiness,
@@ -433,10 +467,10 @@ def main():
                         yolo_state=yolo.get_latest(), yolo=yolo, std_dev=std_dev, brightness=brightness,
                         perf={"fps": _r(fps_display, 1), "stages_ms": last_stages},
                         thermal=last_thermal, sysinfo=last_sysinfo,
-                        links={**health, "yolo": yolo.health(now)["state"]}, baseline=calib_baseline,
+                        links={**health, "yolo": yolo.health(now)["state"], "uno": uno.status}, baseline=calib_baseline,
                         calibrating=True, paused=paused,
                         calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
-                                        if calibration_start is not None else 0.0)), now)
+                                        if calibration_start is not None else 0.0))), now)
 
                 if display_due:
                     cv2.imshow("DriverGuardian", frame)
@@ -478,11 +512,17 @@ def main():
             # mesh dots used to be drawn first, so YOLO was looking at 478
             # green dots painted over the face and mouth, exactly where it
             # looks for phones, drinks and cigarettes.
-            if time.monotonic() - last_yolo_submit >= config.YOLO_INTERVAL_SEC:
+            if not tests.blocks_yolo and time.monotonic() - last_yolo_submit >= config.YOLO_INTERVAL_SEC:
                 roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
                 if yolo.submit(frame, roi):
                     last_yolo_submit = time.monotonic()
             yolo_state = yolo.get_latest()
+            if tests.active:   # before anything is drawn: the delay test records these frames
+                tests.update(now, face_found=face_found, drowsy=drowsy_state, brightness=brightness,
+                             yolo_state=yolo_state, frame=frame, yolo=yolo,
+                             roi_fn=lambda: utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT)
+                             if face_found else None)
+                sync_tests()
             if show and face_found:
                 face_mesh.draw(frame, drawable)
             t_yolo = time.perf_counter()
@@ -520,12 +560,15 @@ def main():
                 # detection) but nothing is classified or alerted; the ESP32
                 # gets WAITING, so the vehicle stays stopped.
                 risk, messages, debug = Risk.WAITING, ["Monitoring paused"], {"case": "PAUSED", "score": None}
+            elif tests.active:
+                # A test from the dashboard: no alerts, the car stays stopped.
+                risk, messages, debug = Risk.WAITING, [tests.title], {"case": "TEST", "score": None}
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
 
             if recorder.wants_update(now):
                 health = alerts.health(now)
                 yh = yolo.health(now)
-                recorder.update(dashboard_state(
+                recorder.update(dict(test=tests.status(now), cabin=uno.state(now), **dashboard_state(
                     risk=risk, debug=debug, messages=messages, presence=presence, face_found=face_found,
                     drowsy_state=drowsy_state, drowsiness=drowsiness, ear=smoothed_ear, mar=smoothed_mar,
                     pose_state=pose_state, yolo_state=yolo_state, yolo=yolo,
@@ -536,8 +579,8 @@ def main():
                           "updates_total": risk_updates_session,
                           "camera_fps": config.CAMERA_FPS},
                     thermal=last_thermal, sysinfo=last_sysinfo,
-                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1)},
-                    baseline=calib_baseline, paused=paused), now)
+                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1), "uno": uno.status},
+                    baseline=calib_baseline, paused=paused)), now)
 
             if risk == Risk.WAITING:
                 risk_last_t = None
@@ -808,6 +851,7 @@ def main():
             store.close()
             print(f"Session saved to the history database: {config.SESSION_DB_PATH}")
         alerts.close()  # stop any alert still being spoken
+        uno.close()
         web.close()
         camera.release()
         cv2.destroyAllWindows()

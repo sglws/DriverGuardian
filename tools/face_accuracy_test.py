@@ -200,63 +200,40 @@ def pct(a, b):
 
 
 def summarize(rows, title):
+    from app.testing import score_face   # same scoring as the dashboard's test mode
     print(f"\n===== {title} =====")
     if not rows:
         print("No data.")
         return
-    conds = sorted({r["condition"] for r in rows})
-    print(f"Conditions: {', '.join(conds)} | frames: {len(rows)} | "
-          f"face found: {pct(sum(int(r['face_found']) for r in rows), len(rows))} | "
-          f"low-light enhancement active: {pct(sum(int(r['low_light']) for r in rows), len(rows))}")
+    r = score_face(rows)
+    e, y = r["eye"], r["yawn"]
+    conds = sorted({row["condition"] for row in rows})
+    print(f"Conditions: {', '.join(conds)} | frames: {r['frames']} | "
+          f"face found: {100 * r['face_found']:.1f}% | "
+          f"low-light enhancement active: {100 * r['low_light']:.1f}%")
 
-    # ---- Eye state, per frame ----
-    eye = [r for r in rows if r["scored"] in ("1", 1) and r["eye_label"]]
-    tp = sum(1 for r in eye if r["eye_label"] == "closed" and int(r["eye_closed_pred"]))
-    fn = sum(1 for r in eye if r["eye_label"] == "closed" and not int(r["eye_closed_pred"]))
-    tn = sum(1 for r in eye if r["eye_label"] == "open" and not int(r["eye_closed_pred"]))
-    fp = sum(1 for r in eye if r["eye_label"] == "open" and int(r["eye_closed_pred"]))
-    n = tp + fn + tn + fp
-    closed_recall = tp / (tp + fn) if tp + fn else 0.0
-    open_recall = tn / (tn + fp) if tn + fp else 0.0
-    eye_acc = (tp + tn) / n if n else 0.0
-    eye_bal = (closed_recall + open_recall) / 2
-    no_face_closed = sum(1 for r in eye if r["eye_label"] == "closed" and not int(r["face_found"]))
     print("\nEYE STATE (per frame)")
-    print(f"  frames scored: {n}  (closed {tp + fn}, open {tn + fp})")
-    print(f"  confusion:     closed->closed {tp}  closed->open {fn}  open->open {tn}  open->closed {fp}")
-    print(f"  closed eyes detected: {pct(tp, tp + fn)}   open eyes correct: {pct(tn, tn + fp)}")
-    if no_face_closed:
-        print(f"  note: {no_face_closed} of the missed closed-eye frames had no face detected")
-    print(f"  accuracy {100 * eye_acc:.1f}%   balanced accuracy {100 * eye_bal:.1f}%")
+    print(f"  frames scored: {e['frames']}  (closed {e['closed_frames']}, open {e['open_frames']})")
+    print(f"  confusion:     closed->closed {e['tp']}  closed->open {e['fn']}  "
+          f"open->open {e['tn']}  open->closed {e['fp']}")
+    print(f"  closed eyes detected: {pct(e['tp'], e['closed_frames'])}   "
+          f"open eyes correct: {pct(e['tn'], e['open_frames'])}")
+    if e["no_face_closed"]:
+        print(f"  note: {e['no_face_closed']} of the missed closed-eye frames had no face detected")
+    print(f"  accuracy {100 * e['accuracy']:.1f}%   balanced accuracy {100 * e['balanced']:.1f}%")
 
-    # ---- Yawning, per event (step) and per frame ----
-    steps = {}
-    for r in rows:
-        key = (r["condition"], r["round"], r["step_id"])
-        s = steps.setdefault(key, {"step": r["step"], "yawn": False})
-        s["yawn"] |= bool(int(r["is_yawning"]))
-    yawn_steps = [s for s in steps.values() if s["step"] == "YAWN"]
-    other_steps = [s for s in steps.values() if s["step"] in ("OPEN", "TALK", "CLOSED")]
-    talk_steps = [s for s in steps.values() if s["step"] == "TALK"]
-    hit = sum(s["yawn"] for s in yawn_steps)
-    false_yawn = sum(s["yawn"] for s in other_steps)
-    ev_n = len(yawn_steps) + len(other_steps)
-    yawn_acc = (hit + len(other_steps) - false_yawn) / ev_n if ev_n else 0.0
-    mouth = [r for r in rows if r["scored"] in ("1", 1)]
-    m_ok = sum(1 for r in mouth if int(r["mouth_open_pred"]) == int(r["yawn_label"]))
     print("\nYAWNING (per event)")
-    print(f"  yawns detected: {hit}/{len(yawn_steps)}   "
-          f"false yawns: {false_yawn}/{len(other_steps)} non-yawn steps "
-          f"(talking: {sum(s['yawn'] for s in talk_steps)}/{len(talk_steps)})")
-    print(f"  event accuracy {100 * yawn_acc:.1f}%   (mouth-open per-frame accuracy {pct(m_ok, len(mouth))})")
+    print(f"  yawns detected: {y['hits']}/{y['steps']}   "
+          f"false yawns: {y['false']}/{y['other_steps']} non-yawn steps "
+          f"(talking: {y['talk_false']}/{y['talk_steps']})")
+    print(f"  event accuracy {100 * y['accuracy']:.1f}%   "
+          f"(mouth-open per-frame accuracy {100 * y['mouth_frame_acc']:.1f}%)")
 
     print(f"\nRequirement >= {REQUIREMENT:.0%}:")
-    print(f"  eye state (balanced accuracy): {100 * eye_bal:.1f}%  "
-          f"{'PASS' if eye_bal >= REQUIREMENT else 'FAIL'}")
-    print(f"  yawning (event accuracy):      {100 * yawn_acc:.1f}%  "
-          f"{'PASS' if yawn_acc >= REQUIREMENT else 'FAIL'}")
-    if len(yawn_steps) < 10:
-        print(f"  (only {len(yawn_steps)} yawn events - combine several runs with --report "
+    print(f"  eye state (balanced accuracy): {100 * e['balanced']:.1f}%  {'PASS' if e['pass'] else 'FAIL'}")
+    print(f"  yawning (event accuracy):      {100 * y['accuracy']:.1f}%  {'PASS' if y['pass'] else 'FAIL'}")
+    if y["steps"] < 10:
+        print(f"  (only {y['steps']} yawn events - combine several runs with --report "
               f"for a figure worth citing)")
 
 

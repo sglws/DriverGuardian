@@ -57,13 +57,28 @@ PROMPTS = {
     "LEAN":           ("Please sit upright.", 6.0),
     "MICROSLEEP":     ("Stay alert.", 5.0),
     "YAWN":           ("You seem tired. Consider taking a break.", 60.0),
-    "SLEEP":          ("Wake up. Stopping the vehicle.", 0.0),
-    "LEAN_PROLONGED": ("No response. Stopping the vehicle.", 0.0),
-    "TURN_PROLONGED": ("No response. Stopping the vehicle.", 0.0),
-    "BLOCKED":        ("Camera blocked. Stopping the vehicle.", 0.0),
-    "ABSENT":         ("Driver not detected. Stopping the vehicle.", 0.0),
+    "SLEEP":          ("Wake up! Pulling over to the right to stop safely.", 0.0),
+    "LEAN_PROLONGED": ("No response. Pulling over to the right to stop safely.", 0.0),
+    "TURN_PROLONGED": ("No response. Pulling over to the right to stop safely.", 0.0),
+    "BLOCKED":        ("Camera blocked. Pulling over to the right to stop safely.", 0.0),
+    "ABSENT":         ("Driver not detected. Pulling over to the right to stop safely.", 0.0),
 }
 ALIASES = {"PHONE_REPEAT": "PHONE", "CONSUMPTION_REPEAT": "CONSUMPTION"}
+
+# Instructions for the tests run from the dashboard (app/testing.py), spoken
+# so the tester can follow them with eyes closed or looking at the camera.
+TEST_PROMPTS = {
+    "T_READY":  "Test starting. Follow the instructions.",
+    "T_OPEN":   "Eyes open. Look at the camera, mouth closed.",
+    "T_CLOSED": "Close your eyes. Open them at the next tone.",
+    "T_BLINK":  "Open your eyes. Blink normally.",
+    "T_TALK":   "Now talk, or count out loud.",
+    "T_YAWN":   "Yawn. Open your mouth wide and hold it.",
+    "T_RELAX":  "Relax. Eyes open, mouth closed.",
+    "T_HIDE":   "Hide the object, out of view.",
+    "T_SHOW":   "Show it now, and hold it in view.",
+    "T_DONE":   "Test complete.",
+}
 
 _RENDER_VERSION = "1"   # bump to force re-rendering after changing the audio design
 _CACHE_DIR = os.path.join(config.BASE_DIR, "assets", "voice_cache")
@@ -210,9 +225,11 @@ class VoiceAlerts:
 
         os.makedirs(_CACHE_DIR, exist_ok=True)
         todo = []   # (case, text, {critical: path}) still missing from the cache
-        for case, (text, _) in PROMPTS.items():
+        phrases = [(case, text, (False, True)) for case, (text, _) in PROMPTS.items()]
+        phrases += [(key, text, (False,)) for key, text in TEST_PROMPTS.items()]
+        for case, text, variants in phrases:
             paths = {}
-            for critical in (False, True):
+            for critical in variants:
                 tag = hashlib.sha1(f"{_RENDER_VERSION}|{engine}|{critical}|{text}".encode()).hexdigest()[:10]
                 paths[critical] = os.path.join(_CACHE_DIR, f"{case.lower()}_{'crit' if critical else 'warn'}_{tag}.wav")
             if any(not os.path.exists(path) for path in paths.values()):
@@ -239,7 +256,7 @@ class VoiceAlerts:
                 finally:
                     if os.path.exists(raw):
                         os.remove(raw)
-        print(f"[VOICE] ready - {len(self._files) // 2} of {len(PROMPTS)} phrases ({engine}, "
+        print(f"[VOICE] ready - {len(self._files)} of {2 * len(PROMPTS) + len(TEST_PROMPTS)} prompts ({engine}, "
               f"{len(todo)} newly rendered), playing via {os.path.basename(self._player[0])}")
 
     def _busy(self, now):
@@ -295,6 +312,16 @@ class VoiceAlerts:
             self._play(key, critical, now)
         else:
             self._last_start[key] = now   # printed only (voice disabled or unavailable)
+
+    def say(self, key: str, now: float):
+        """Play a test instruction right away. Cuts off a warning, never a
+        critical alert; not logged as an alert."""
+        self._busy(now)
+        if self.muted or (key, False) not in self._files:
+            return
+        if self._proc is not None and self._playing_critical:
+            return
+        self._play((key, False), False, now)
 
     @property
     def status(self) -> str:

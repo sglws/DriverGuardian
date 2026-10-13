@@ -35,6 +35,7 @@ freeze. Commands are queued for the main loop, which applies them.
 
 import csv
 import io
+import hmac
 import json
 import os
 import re
@@ -47,11 +48,15 @@ from urllib.parse import parse_qs, urlparse
 import cv2
 
 from app import config
+from app.storage import FLAG_BITS
 
 _WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
 _CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml"}
-_ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute"}
+                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
+                  ".woff2": "font/woff2"}   # manrope.woff2: bundled UI font (SIL OFL, manrope-OFL.txt)
+_ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute",
+            "test_start", "test_stop"}
+_PIN_MAX_FAILS, _PIN_LOCK_SEC = 5, 60.0
 
 
 def _lan_address():
@@ -79,6 +84,7 @@ class WebView:
         self._last_handoff = 0.0
         self._commands = []
         self._cmd_lock = threading.Lock()
+        self._pin_fails = {}                   # client ip -> (failed attempts, locked until)
         if not self.enabled:
             return
         try:
@@ -178,6 +184,36 @@ class WebView:
                 # trigger actions on the Pi through a visitor's browser.
                 return self.headers.get("X-DriverGuardian") == "1"
 
+            def _pin_check(self, pin):
+                """True if the PIN is right (or none is configured). Five wrong
+                tries from one address lock it out for a minute."""
+                if not config.DASHBOARD_PIN:
+                    return True
+                ip = self.client_address[0]
+                fails, until = view._pin_fails.get(ip, (0, 0.0))
+                if time.monotonic() < until:
+                    raise PermissionError("locked")
+                if hmac.compare_digest(str(pin or "").encode(), config.DASHBOARD_PIN.encode()):
+                    view._pin_fails.pop(ip, None)
+                    return True
+                fails += 1
+                view._pin_fails[ip] = (fails, time.monotonic() + _PIN_LOCK_SEC if fails >= _PIN_MAX_FAILS else 0.0)
+                return False
+
+            def _authorized(self):
+                """Every change (controls, markers, renames, deletes) needs the PIN."""
+                if not self._trusted():
+                    self._error(403, "forbidden")
+                    return False
+                try:
+                    ok = self._pin_check(self.headers.get("X-DG-PIN"))
+                except PermissionError:
+                    self._json({"ok": False, "error": "too many wrong PINs - try again in a minute", "pin": True}, 429)
+                    return False
+                if not ok:
+                    self._json({"ok": False, "error": "PIN required", "pin": True}, 401)
+                return ok
+
             # ---------------------------------------------------- GET
             def do_GET(self):
                 url = urlparse(self.path)
@@ -193,6 +229,7 @@ class WebView:
                         state["age_sec"] = (time.monotonic() - at) if at else None
                         state["viewers"] = view._viewers
                         state["history_keep"] = config.SESSION_HISTORY_KEEP
+                        state["pin_required"] = bool(config.DASHBOARD_PIN)
                         return self._json(state)
                     if path == "/api/history":
                         return self._json({"samples": view.recorder.history_since(float(q.get("since", ["-1"])[0])),
@@ -232,6 +269,10 @@ class WebView:
                 if csv_kind is None:
                     return self._json(s)
                 rows = s["samples"] if csv_kind == "samples" else s["events"]
+                if csv_kind == "samples":         # detector flags as readable 0/1 columns
+                    rows = [{**{k: v for k, v in r.items() if k != "flags"},
+                             **{name: ("" if r.get("flags") is None else int(bool(r["flags"] & bit)))
+                                for name, bit in FLAG_BITS.items()}} for r in rows]
                 buf = io.StringIO()
                 if rows:
                     w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
@@ -246,9 +287,19 @@ class WebView:
 
             # ---------------------------------------------------- POST / DELETE
             def do_POST(self):
-                if not self._trusted():
-                    return self._error(403, "forbidden")
                 path = urlparse(self.path).path
+                if path == "/api/auth":                     # check a PIN before using it
+                    if not self._trusted():
+                        return self._error(403, "forbidden")
+                    try:
+                        ok = self._pin_check(self._body().get("pin"))
+                    except PermissionError:
+                        return self._json({"ok": False, "error": "too many wrong PINs - try again in a minute"}, 429)
+                    except (ValueError, json.JSONDecodeError):
+                        return self._error(400, "bad request")
+                    return self._json({"ok": ok}, 200 if ok else 401)
+                if not self._authorized():
+                    return
                 try:
                     body = self._body()
                 except (ValueError, json.JSONDecodeError):
@@ -280,8 +331,8 @@ class WebView:
                 self._error(404, "not found")
 
             def do_DELETE(self):
-                if not self._trusted():
-                    return self._error(403, "forbidden")
+                if not self._authorized():
+                    return
                 m = re.fullmatch(r"/api/sessions/(\d+)", urlparse(self.path).path)
                 if not m or view.store is None:
                     return self._error(404, "not found")

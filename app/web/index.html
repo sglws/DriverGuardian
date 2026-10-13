@@ -6,12 +6,15 @@
   <title>DriverGuardian Monitor</title>
   <meta name="description" content="Live driver monitoring dashboard and session history">
   <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
-  <meta name="theme-color" content="#1d6e87">
+  <meta name="theme-color" content="#0b0f14">
+  <link rel="preload" href="/static/manrope.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
-<header class="topbar">
-  <div class="brand">
+<a class="skip" href="#app">Skip to the dashboard</a>
+<div class="ambient" aria-hidden="true"></div>
+<aside class="rail">
+  <div class="brand" title="DriverGuardian">
     <svg class="mark" viewBox="0 0 48 48" aria-hidden="true">
       <g fill="none" stroke="var(--brand-orange)" stroke-width="3.4" stroke-linecap="round" stroke-linejoin="round">
         <path d="M4 14V9a5 5 0 0 1 5-5h5"/><path d="M34 4h5a5 5 0 0 1 5 5v5"/>
@@ -21,127 +24,153 @@
         <circle cx="24" cy="24.5" r="13"/><path d="M11 25.5h6.6M30.4 25.5H37M24 33v4.5"/>
       </g>
       <path d="M24 16.6l6.6 2.5v4.8c0 4.3-2.8 7.6-6.6 8.9-3.8-1.3-6.6-4.6-6.6-8.9v-4.8z" fill="var(--brand-teal)"/>
-      <path d="m20.9 24.6 2.2 2.2 4.1-4.3" fill="none" stroke="var(--page)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="m20.9 24.6 2.2 2.2 4.1-4.3" fill="none" stroke="var(--surface)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
     </svg>
-    <div><b class="wordmark">Driver<span>Guardian</span></b><span class="tagline">Driver monitoring</span></div>
+    <b class="wordmark">Driver<span>Guardian</span></b>
   </div>
   <nav class="tabs" role="tablist" aria-label="Views">
-    <button role="tab" id="tab-live" aria-selected="true" aria-controls="view-live">Live</button>
-    <button role="tab" id="tab-history" aria-selected="false" aria-controls="view-history">History</button>
+    <button role="tab" id="tab-live" aria-selected="true" aria-controls="view-live">
+      <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg><span>Live</span></button>
+    <button role="tab" id="tab-history" aria-selected="false" aria-controls="view-history">
+      <svg class="i" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6L3.5 8.5"/><path d="M3.5 3.5v5h5M12 7.5V12l3 2"/></svg><span>History</span></button>
   </nav>
-  <div class="top-right">
-    <span class="conn" id="conn" role="status"><span class="dot"></span><span id="conn-text">Connecting…</span></span>
-    <button class="icon-btn" id="btn-sound" aria-pressed="false" title="Play a sound in this browser when risk turns high">
-      <svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
-    </button>
-    <button class="icon-btn" id="btn-theme" title="Theme: follows the system" aria-label="Toggle light / dark theme">
-      <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
-    </button>
+  <div class="rail-tools icon-group">
+      <button class="icon-btn" id="btn-kiosk" data-tip="Presentation mode (K)" aria-label="Presentation mode">
+        <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M12 16v4M8 20h8"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-sound" aria-pressed="false" data-tip="Browser sound on high risk" aria-label="Browser sound on high risk">
+        <svg class="i" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.9 1.9 0 0 0 3.4 0"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-theme" data-tip="Theme: system" aria-label="Change theme">
+        <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 4a8 8 0 0 0 0 16z" fill="currentColor"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-lock" data-tip="Controls locked" aria-label="Controls locked" hidden>
+        <svg class="i" viewBox="0 0 24 24"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>
+      </button>
+      <button class="icon-btn" id="btn-help" data-tip="Keyboard shortcuts (?)" aria-label="Keyboard shortcuts">
+        <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.6 9.3a2.5 2.5 0 0 1 4.8.9c0 1.7-2.4 2.2-2.4 3.8M12 17.2v.01"/></svg>
+      </button>
   </div>
-</header>
+  <span class="conn" id="conn" role="status"><span class="dot"></span><span id="conn-text">Connecting…</span></span>
+</aside>
+<button class="top-risk" id="top-risk" hidden title="Live risk level - go to the live view">
+  <span class="tr-dot"></span><span class="tr-level" id="top-risk-level"></span><span class="tr-case" id="top-risk-case"></span>
+</button>
 
-<main class="wrap loading" id="app">
+<main class="wrap loading" id="app" tabindex="-1">
 
 <!-- ============================================================ LIVE -->
 <section id="view-live" role="tabpanel" aria-labelledby="tab-live">
 
-  <div class="card sessionbar" id="sessionbar">
+  <div class="sessionbar" id="sessionbar">
     <div class="sb-left">
       <span class="state-badge" id="state-badge"><span class="dot"></span><span id="state-text">Starting</span></span>
       <div class="sb-name">
-        <input id="session-name" type="text" maxlength="120" aria-label="Session name" placeholder="Session name" spellcheck="false">
+        <input id="session-name" type="text" maxlength="120" aria-label="Session name (click to rename)" placeholder="Session name" spellcheck="false">
         <div class="sb-meta" id="session-meta"></div>
       </div>
     </div>
     <div class="sb-actions">
-      <button id="btn-pause" title="Pause or resume monitoring (P)">
-        <svg class="i" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span>Pause</span>
-      </button>
-      <button id="btn-mark" title="Add a marker to the session (M)">
-        <svg class="i" viewBox="0 0 24 24"><path d="M5 21V4h11l-2 4 2 4H5"/></svg><span>Mark</span>
-      </button>
-      <button id="btn-recal" title="Recalibrate the driver's baseline (3 s, looking straight ahead)">
-        <svg class="i" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg><span>Recalibrate</span>
-      </button>
-      <button id="btn-mute" class="icon-btn" aria-pressed="false" aria-label="Mute voice alerts" title="Mute the spoken alerts">
+      <div class="btn-group" role="group" aria-label="Monitoring">
+        <button id="btn-pause" data-tip="Pause or resume monitoring (P)">
+          <svg class="i" viewBox="0 0 24 24"><path d="M9 5v14M15 5v14"/></svg><span>Pause</span>
+        </button>
+        <button id="btn-mark" data-tip="Mark this moment (M)">
+          <svg class="i" viewBox="0 0 24 24"><path d="M5 21V4h11l-2 4 2 4H5"/></svg><span>Mark</span>
+        </button>
+        <button id="btn-test" data-tip="Run an accuracy or delay test (T)">
+          <svg class="i" viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 1.8 3h10.4a2 2 0 0 0 1.8-3l-5-9V3"/><path d="M7.5 15h9"/></svg><span>Test</span>
+        </button>
+        <button id="btn-recal" data-tip="Recalibrate: 3 s looking straight ahead">
+          <svg class="i" viewBox="0 0 24 24"><path d="M21 12a9 9 0 1 1-3-6.7L21 8"/><path d="M21 3v5h-5"/></svg><span>Recalibrate</span>
+        </button>
+      </div>
+      <button id="btn-mute" class="icon-btn" aria-pressed="false" aria-label="Mute voice alerts" data-tip="Mute the spoken alerts">
         <svg class="i" viewBox="0 0 24 24"><path d="M4 9v6h4l5 4V5L8 9z"/><path d="M16.5 8.5a5 5 0 0 1 0 7"/></svg>
       </button>
-      <a class="btn icon-btn" id="btn-snap" href="/snapshot.jpg" download aria-label="Download a snapshot" title="Download the current frame">
-        <svg class="i" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>
-      </a>
-      <span class="sep" aria-hidden="true"></span>
-      <button id="btn-new" title="Save this session and start a new one (with calibration)">
+      <button id="btn-new" class="primary" data-tip="Save this session and start a new one">
         <svg class="i" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></svg><span>New session</span>
       </button>
-      <button id="btn-stop" class="danger" title="Save the session and stop the app">
+      <button id="btn-stop" class="danger" data-tip="Save the session and stop the app">
         <svg class="i" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2"/></svg><span>Stop</span>
       </button>
-    </div>
-  </div>
-
-  <div class="top">
-    <div class="main-col">
-      <div class="video" id="video-box">
-        <img id="video" alt="Live camera view with face mesh and object detections">
-        <div class="waiting" id="video-wait"><span class="spinner" aria-hidden="true"></span>Waiting for video…</div>
-        <div class="scanline" aria-hidden="true"></div>
-        <div class="badge"><span class="pill" id="live-pill"><span class="rec"></span><span id="live-pill-text">LIVE</span></span><span class="pill" id="video-fps"></span></div>
-        <div class="tools">
-          <button id="btn-full" title="Full screen (F)" aria-label="Full screen">
-            <svg class="i" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
-          </button>
+      <div class="menu-wrap">
+        <button id="btn-more" class="icon-btn" aria-haspopup="menu" aria-expanded="false" aria-controls="more-menu" aria-label="More actions" data-tip="More">
+          <svg class="i" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.3"/><circle cx="12" cy="12" r="1.3"/><circle cx="19" cy="12" r="1.3"/></svg>
+        </button>
+        <div class="menu" id="more-menu" role="menu" hidden>
+          <a role="menuitem" class="mi" id="btn-snap" href="/snapshot.jpg" download>
+            <svg class="i" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/></svg>Download a snapshot</a>
+          <button role="menuitem" class="mi" id="mi-kiosk">
+            <svg class="i" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="12" rx="1.5"/><path d="M12 16v4M8 20h8"/></svg>Presentation mode<kbd>K</kbd></button>
+          <button role="menuitem" class="mi" id="mi-help">
+            <svg class="i" viewBox="0 0 24 24"><rect x="2.5" y="6" width="19" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>Keyboard shortcuts<kbd>?</kbd></button>
         </div>
-        <div class="calib" id="calib" hidden>
-          <div class="txt">Calibrating — look straight at the camera, eyes open, mouth closed</div>
-          <div class="bar"><i id="calib-bar" style="width:0"></i></div>
-        </div>
-        <div class="paused-cover" id="paused-cover" hidden>
-          <div><b>Monitoring paused</b><span>Alerts are off · the vehicle is held in WAITING</span></div>
-        </div>
-      </div>
-      <div class="card dim-when-stale">
-        <div class="card-h"><h2>Driver &amp; cabin</h2><span class="sub">live</span></div>
-        <div class="card-b"><div class="chips" id="chips"></div></div>
-      </div>
-    </div>
-
-    <div class="side">
-      <div class="card hero dim-when-stale" id="hero" aria-live="polite">
-        <div class="row">
-          <div class="icon" id="hero-icon"></div>
-          <div>
-            <div class="label">Risk level</div>
-            <div class="level" id="hero-level">—</div>
-          </div>
-        </div>
-        <div class="ladder" id="hero-ladder" aria-hidden="true">
-          <div data-r="SAFE"><i></i><span>Safe</span></div><div data-r="LOW"><i></i><span>Low</span></div>
-          <div data-r="MEDIUM"><i></i><span>Medium</span></div><div data-r="HIGH"><i></i><span>High</span></div>
-        </div>
-        <div class="case" id="hero-case"></div>
-        <div class="msg" id="hero-msg"></div>
-        <div class="facts">
-          <span>for <b id="hero-for">—</b></span>
-          <span>score <b id="hero-score">—</b></span>
-          <span>updates <b id="hero-rate">—</b></span>
-        </div>
-      </div>
-      <div class="card events-card">
-        <div class="card-h"><h2>Event log</h2><span class="sub" id="ev-count"></span></div>
-        <div class="filters" id="ev-filters" role="group" aria-label="Filter events">
-          <button data-kind="all" aria-pressed="true">All</button>
-          <button data-kind="risk" aria-pressed="false">Risk</button>
-          <button data-kind="marker" aria-pressed="false">Markers</button>
-          <button data-kind="voice" aria-pressed="false">Voice</button>
-          <button data-kind="detect" aria-pressed="false">Detection</button>
-          <button data-kind="system" aria-pressed="false">System</button>
-        </div>
-        <div class="events" id="events"></div>
       </div>
     </div>
   </div>
 
-  <section class="dim-when-stale">
+  <div class="live-grid">
+    <div class="video" id="video-box">
+      <img id="video" alt="Live camera view with face mesh and object detections">
+      <div class="waiting" id="video-wait"><span class="spinner" aria-hidden="true"></span>Waiting for video…</div>
+      <div class="scanline" aria-hidden="true"></div>
+      <div class="badge"><span class="pill" id="live-pill"><span class="rec"></span><span id="live-pill-text">LIVE</span></span><span class="pill" id="video-fps"></span></div>
+      <div class="tools">
+        <button id="btn-full" data-tip="Full screen (F)" aria-label="Full screen">
+          <svg class="i" viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
+      </div>
+      <div class="calib" id="calib" hidden>
+        <div class="txt">Calibrating — look straight at the camera, eyes open, mouth closed</div>
+        <div class="bar"><i id="calib-bar" style="width:0"></i></div>
+      </div>
+      <div class="test-ov" id="test-ov" hidden aria-live="assertive">
+        <div class="to-top"><span class="to-title" id="to-title"></span><span class="to-step" id="to-step"></span>
+          <button class="to-stop" id="to-stop">Stop test</button></div>
+        <div class="to-main"><div class="to-instr" id="to-instr"></div><div class="to-count" id="to-count"></div></div>
+        <div class="to-bottom"><span class="to-sees" id="to-sees"></span><div class="bar"><i id="to-bar" style="width:0"></i></div></div>
+      </div>
+      <div class="paused-cover" id="paused-cover" hidden>
+        <div><b>Monitoring paused</b><span>Alerts are off and the vehicle is held stopped</span></div>
+      </div>
+    </div>
+
+    <section class="risk dim-when-stale" id="hero" aria-live="polite" aria-label="Risk level">
+      <div class="risk-h"><h2>Risk level</h2><span class="risk-dot"></span></div>
+      <div class="gauge" id="gauge" aria-hidden="true"></div>
+      <div class="level" id="hero-level">—</div>
+      <div class="case" id="hero-case"></div>
+      <p class="msg" id="hero-msg"></p>
+      <dl class="facts">
+        <div><dt>Held for</dt><dd id="hero-for">—</dd></div>
+        <div><dt>Since</dt><dd id="hero-since">—</dd></div>
+        <div><dt>Score</dt><dd id="hero-score">—</dd></div>
+      </dl>
+    </section>
+
+    <ul class="telltales dim-when-stale" id="telltales" aria-label="Warning lamps"></ul>
+
+    <ol class="chain dim-when-stale" id="chain" aria-label="Signal chain, from the camera to the vehicle"></ol>
+
+    <div class="card events-card" id="events-card">
+      <div class="card-h"><h2>Event log</h2><span class="sub" id="ev-count"></span></div>
+      <div class="filters" id="ev-filters"></div>
+      <div class="events" id="events"></div>
+    </div>
+
+    <div class="card readings-card dim-when-stale">
+      <div class="card-h"><h2>Readings</h2><span class="sub" id="chips-sub"></span></div>
+      <div class="card-b"><dl class="readings" id="chips"></dl></div>
+    </div>
+
+    <div class="card dim-when-stale vehicle-card">
+      <div class="card-h"><h2>Vehicle</h2><span class="sub" id="veh-sub"></span></div>
+      <div class="card-b" id="p-vehicle"></div>
+    </div>
+  </div>
+
+  <section class="dim-when-stale trends">
     <div class="toolbar">
       <h2>Trends</h2>
       <div class="seg" role="group" aria-label="Time range" id="range">
@@ -152,24 +181,38 @@
     </div>
     <div class="charts">
       <div class="card wide" id="c-risk"></div>
+      <div class="card wide" id="c-lanes"></div>
       <div class="card" id="c-ear"></div>
       <div class="card" id="c-mar"></div>
       <div class="card" id="c-head"></div>
+      <div class="card" id="c-perclos"></div>
+      <div class="card" id="c-blinks"></div>
+      <div class="card" id="c-fatigue"></div>
+      <div class="card wide" id="c-air"></div>
     </div>
   </section>
 
-  <section class="panels dim-when-stale">
-    <div class="card"><div class="card-h"><h2>Requirements &amp; performance</h2></div><div class="card-b" id="p-req"></div></div>
-    <div class="card"><div class="card-h"><h2>System health</h2></div><div class="card-b" id="p-sys"></div></div>
-    <div class="card"><div class="card-h"><h2>Session</h2><span class="sub" id="session-start"></span></div><div class="card-b" id="p-session"></div></div>
-  </section>
+  <details class="drawer dim-when-stale" id="diag">
+    <summary><span class="dr-title"><svg class="i chev" viewBox="0 0 24 24"><path d="m9 6 6 6-6 6"/></svg>Diagnostics</span>
+      <span class="dr-sum" id="diag-sum"></span></summary>
+    <section class="panels">
+      <div class="card"><div class="card-h"><h2>Requirements &amp; performance</h2></div><div class="card-b" id="p-req"></div></div>
+      <div class="card"><div class="card-h"><h2>System health</h2></div><div class="card-b" id="p-sys"></div></div>
+      <div class="card"><div class="card-h"><h2>Session</h2><span class="sub" id="session-start"></span></div><div class="card-b" id="p-session"></div></div>
+    </section>
+  </details>
 </section>
 
 <!-- ============================================================ HISTORY -->
 <section id="view-history" role="tabpanel" aria-labelledby="tab-history" hidden>
+  <h1 class="page-title">Session history</h1>
   <div class="history">
     <aside class="card hist-list-card">
       <div class="card-h"><h2>Saved sessions</h2><span class="sub" id="hist-keep"></span></div>
+      <div class="hist-search">
+        <svg class="i" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4.5 4.5"/></svg>
+        <input id="hist-q" type="search" placeholder="Search sessions" aria-label="Search sessions by name or notes">
+      </div>
       <div class="hist-list" id="hist-list" role="listbox" aria-label="Saved sessions"></div>
     </aside>
     <div class="hist-detail" id="hist-detail">
@@ -178,23 +221,94 @@
   </div>
 </section>
 
-<footer>DriverGuardian · served by the monitoring app on this device · data stays on your network ·
-  shortcuts: <kbd>P</kbd> pause · <kbd>M</kbd> mark · <kbd>F</kbd> full screen</footer>
+<!-- ============================================================ REPORT / COMPARE (filled by app.js) -->
+<section id="view-report" class="doc-view" hidden></section>
+<section id="view-compare" class="doc-view" hidden></section>
+
+<footer>Served by the DriverGuardian app on this device. Nothing leaves your network. Press <kbd>?</kbd> for keyboard shortcuts.</footer>
 </main>
+
+<!-- ============================================================ PRESENTATION -->
+<div class="kiosk" id="kiosk" hidden>
+  <div class="k-video" id="k-video"></div>
+  <div class="k-side" id="k-side">
+    <div class="k-brand"><b class="wordmark">Driver<span>Guardian</span></b>
+      <button class="icon-btn" id="k-exit" title="Leave presentation mode (Esc)" aria-label="Leave presentation mode">
+        <svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button></div>
+    <div class="gauge k-gauge" id="k-gauge" aria-hidden="true"></div>
+    <div class="k-level" id="k-level">—</div>
+    <div class="k-case" id="k-case"></div>
+    <div class="k-msg" id="k-msg"></div>
+    <div class="k-facts" id="k-facts"></div>
+  </div>
+</div>
 
 <dialog id="dlg" aria-labelledby="dlg-title">
   <form method="dialog" id="dlg-form">
     <h3 id="dlg-title"></h3>
     <p id="dlg-body"></p>
     <label id="dlg-field" hidden><span id="dlg-label"></span><input id="dlg-input" type="text" maxlength="120"></label>
+    <label id="dlg-sfield" hidden><span id="dlg-slabel"></span><select id="dlg-select"></select></label>
     <div class="dlg-actions">
       <button value="cancel" id="dlg-cancel" formnovalidate>Cancel</button>
       <button value="ok" id="dlg-ok" class="primary">OK</button>
     </div>
   </form>
 </dialog>
+<dialog id="test-dlg" aria-labelledby="td-title">
+  <form method="dialog" id="td-form">
+    <h3 id="td-title">Run a test</h3>
+    <div class="seg td-kind" role="radiogroup" aria-label="Test">
+      <label><input type="radio" name="test" value="face" checked><span>Eye &amp; yawn accuracy</span></label>
+      <label><input type="radio" name="test" value="delay"><span>Detection delay</span></label>
+    </div>
+    <div class="td-pane" data-for="face">
+      <p>A guided script — eyes open, eyes closed, talking, yawning — spoken and shown on the video. What the app sees is compared with what the tester was told to do. Starts with a 3-second calibration. Requirement: ≥ 90 %.</p>
+      <div class="td-grid">
+        <label><span>Rounds (≈ 31 s each)</span><select name="rounds"><option>1</option><option selected>2</option><option>3</option><option>4</option><option>5</option></select></label>
+        <label><span>Condition</span><input name="condition" list="td-conds" value="normal" maxlength="40"></label>
+      </div>
+      <datalist id="td-conds"><option value="normal"><option value="dim"><option value="dark"><option value="glasses"><option value="backlit"></datalist>
+    </div>
+    <div class="td-pane" data-for="delay" hidden>
+      <p>Each trial: hide the object, then show it at the tone and hold it. The recorded frames are checked afterwards to find when it really appeared, so reaction time doesn't count. Requirement: ≤ 1 s.</p>
+      <div class="td-grid">
+        <label><span>Object</span><select name="object"><option value="phone">Phone</option><option value="consumption">Cup / bottle at the mouth</option><option value="cigarette">Cigarette</option></select></label>
+        <label><span>Trials (≈ 10 s each)</span><select name="trials"><option>3</option><option selected>5</option><option>8</option><option>10</option></select></label>
+      </div>
+    </div>
+    <p class="td-note">While the test runs there are no alerts and the vehicle stays stopped. Results are saved in this session.</p>
+    <div class="dlg-actions">
+      <button value="cancel" formnovalidate>Cancel</button>
+      <button value="ok" class="primary">Start test</button>
+    </div>
+  </form>
+</dialog>
+<dialog id="res-dlg" aria-labelledby="rd-title">
+  <form method="dialog">
+    <h3 id="rd-title"></h3>
+    <div id="rd-body"></div>
+    <div class="dlg-actions"><button value="ok" class="primary">Close</button></div>
+  </form>
+</dialog>
+<dialog id="help-dlg" aria-labelledby="hd-title">
+  <form method="dialog">
+    <h3 id="hd-title">Keyboard shortcuts</h3>
+    <dl class="keys">
+      <dt><kbd>P</kbd></dt><dd>Pause or resume monitoring</dd>
+      <dt><kbd>M</kbd></dt><dd>Mark this moment</dd>
+      <dt><kbd>T</kbd></dt><dd>Run a test (or stop the running one)</dd>
+      <dt><kbd>F</kbd></dt><dd>Full-screen video</dd>
+      <dt><kbd>K</kbd></dt><dd>Presentation mode</dd>
+      <dt><kbd>L</kbd> / <kbd>H</kbd></dt><dd>Live / History</dd>
+      <dt><kbd>←</kbd> <kbd>→</kbd></dt><dd>Read a focused chart point by point</dd>
+      <dt><kbd>?</kbd></dt><dd>This list</dd>
+    </dl>
+    <div class="dlg-actions"><button value="ok" class="primary">Close</button></div>
+  </form>
+</dialog>
 <div class="toasts" id="toasts" aria-live="polite"></div>
-<div class="banner" id="banner" hidden></div>
+<div class="banner" id="banner" role="alert" hidden></div>
 <div class="tip" id="tip" role="tooltip"></div>
 <script src="/static/app.js"></script>
 </body>

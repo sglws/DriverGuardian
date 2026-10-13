@@ -40,6 +40,17 @@ def main():
             break
         if msg is None:
             break
+        if isinstance(msg[0], str) and msg[0] == "raw":
+            # One frame, no confirmation filter: the detection-delay test
+            # (app/testing.py) uses this to find the frame where an object
+            # first became visible.
+            _, frame, mouth_roi = msg
+            raw = detector.detect(frame, mouth_roi=mouth_roi)
+            try:
+                conn.send({"type": "raw", "result": {k: v for k, v in raw.items() if k != "raw_boxes"}})
+            except (EOFError, OSError):
+                break
+            continue
         frame, mouth_roi, scale = msg
         state = confirmer.update(detector.detect(frame, mouth_roi=mouth_roi), time.monotonic())
         if scale != 1.0:
