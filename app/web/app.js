@@ -630,7 +630,7 @@ function renderChips() {
   // cabin air sensors on the Arduino Uno (shown and recorded; they don't change the risk)
   const cab = s.cabin, unoOn = s.links && s.links.uno === "connected";
   const air = (key, label, ic) => {
-    if (!cab) return [key, ic, label, unoOn ? "No reading yet" : "Not connected", unoOn ? "" : "Arduino Uno on USB", ""];
+    if (!cab) return [key, ic, label, unoOn ? "No reading yet" : "Not connected", unoOn ? "" : (s.links && s.links.uno_note) || "Arduino Uno on USB", unoOn ? "" : "warn"];
     if (!cab.warm) return [key, ic, label, "Warming up", `${duration(cab.warmup_left_s)} left, raw ${cab[key]}`, ""];
     const rel = cab[`${key}_rel`];
     return [key, ic, label, rel == null ? "Measuring clean air" : `${fmt(rel, 2)}× clean air`, `raw ${cab[key]}, ${fmt(cab[`${key}_v`], 2)} V`,
@@ -644,6 +644,7 @@ function renderChips() {
     dt.append(icon(ic), document.createTextNode(label));
     dd.append(el("b", null, value));
     if (extra) dd.append(el("small", null, extra));
+    row.title = [label, value, extra].filter(Boolean).join(": ");
     row.append(dt, dd);
     return row;
   }));
@@ -693,7 +694,7 @@ function renderChain() {
       tone: links.yolo === "running" ? "good" : links.yolo === "disabled" ? "info" : "warn", note: "phone, food, belt" },
     { name: "Cabin sensors", value: s.cabin ? (s.cabin.warm ? (s.cabin.mq3_rel != null ? `${fmt(s.cabin.mq3_rel, 1)}× air` : "Measuring") : "Warming up") : cap(links.uno || "—"),
       tone: links.uno === "connected" ? (s.cabin && s.cabin.warm ? "good" : "warn") : ["disabled", "unsupported"].includes(links.uno) ? "info" : "warn",
-      note: s.cabin && !s.cabin.warm ? `${duration(s.cabin.warmup_left_s)} left` : "Arduino Uno" },
+      note: s.cabin && !s.cabin.warm ? `${duration(s.cabin.warmup_left_s)} left` : links.uno !== "connected" && links.uno_note ? links.uno_note : "Arduino Uno" },
     { name: "Risk engine", value: perf.rate_hz != null ? `${fmt(perf.rate_hz, 1)} Hz` : "—",
       tone: perf.rate_hz == null ? "info" : perf.rate_hz >= (req.min_avg_rate_hz || 0) ? "good" : "crit", note: req.min_avg_rate_hz ? `needs ${req.min_avg_rate_hz} Hz` : "" },
     { name: "Voice", value: links.muted ? "Muted" : cap(links.voice || "—"), tone: links.muted ? "warn" : links.voice === "on" ? "good" : "info",
@@ -709,6 +710,7 @@ function renderChain() {
     const li = list.children[i];
     li.className = `node ${n.tone}`;
     li.children[1].textContent = n.name; li.children[2].textContent = n.value; li.children[3].textContent = n.note;
+    li.title = `${n.name}: ${n.value}${n.note ? ` (${n.note})` : ""}`;
   });
 }
 

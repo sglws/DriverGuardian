@@ -219,6 +219,11 @@ recorded with every session. They do **not** change the risk level.
 |---|---|---|---|
 | MQ-3 | alcohol | AO -> A0 | VCC -> 5V, GND -> GND |
 | MQ-2 | smoke / LPG / gas | AO -> A1 | VCC -> 5V, GND -> GND |
+| BTS7960 | fan (cabin) | RPWM -> pin 6 | its own motor supply |
+
+When the risk turns HIGH the Pi sends `S` and the Uno runs the fan for 3 s,
+again every 10 s while HIGH lasts (`ARDUINO_FAN_ON_HIGH`,
+`ARDUINO_FAN_REPEAT_SEC` in `app/config.py`). Each burst is in the event log.
 
 1. Flash `arduino/DriverGuardian_Uno/DriverGuardian_Uno.ino` with the Arduino IDE
    (board: Arduino Uno).
@@ -237,6 +242,12 @@ after warm-up: start the car in clean air.
 If the ESP32 is also plugged into the Pi by USB, set `ARDUINO_PORT` in
 `app/config.py` to the Uno's fixed path (`ls /dev/serial/by-id/`), so the
 search never opens the ESP32's port. `DG_ARDUINO=0` turns the link off.
+
+**Dashboard says the Uno isn't connected?** The reason is shown under
+"Cabin sensors" and in the event log. For a full check, stop the app and run
+on the Pi: `python tools/check_uno.py`. It lists the serial ports, checks
+your permissions (the `dialout` group), warns about `brltty` (it grabs the
+CH340 chip of clone Unos) and shows what the board actually sends.
 
 ## Running
 

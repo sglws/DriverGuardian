@@ -8,7 +8,9 @@ Display and recording only: nothing here changes the risk level.
 Wire protocol (115200 baud, ~5 lines a second from the Uno):
     SEN,mq3=<0-1023>,mq2=<0-1023>,warm=<0|1>,up=<seconds since power-on>
 The Pi asks "ID?" and the Uno answers "DGUNO,1" (it also says so after a
-reset).
+reset). "S" asks the Uno for a fan burst (BTS7960 on pin 6, 3 s) - sent
+when the risk turns HIGH (ARDUINO_FAN_ON_HIGH). Other lines from the Uno
+are ignored.
 
 Never blocks the main loop - the same pattern as the ESP32 link
 (alerts.Esp32Link): the port is non-blocking, each poll() does at most one
@@ -35,7 +37,8 @@ try:
 except ImportError:          # pyserial missing: the link reports "unsupported"
     serial = None
 
-_VIDS = {0x2341, 0x2A03, 0x1A86}   # Arduino, Arduino.org, WCH CH340/CH341 (Uno clones)
+# Arduino, Arduino.org, WCH CH340/CH341, FTDI, Prolific (Uno and its clones)
+_VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x067B}
 PROBE_SEC = 3.0        # an Uno reboots when its port opens; its hello comes ~2 s later
 RETRY_SEC = 5.0        # wait before searching again after no Uno was found
 STALE_SEC = 5.0        # connected but silent this long -> treat as unplugged
@@ -55,8 +58,15 @@ class UnoLink:
         self._base_samples = {"mq3": [], "mq2": []}
         self._base_started = None
         self.baseline = None
+        self.note = ""                 # why it isn't connected, for the dashboard
         if config.ARDUINO_ENABLED and serial is None:
-            print("[UNO] pyserial is not installed - the cabin sensors are off (pip install pyserial)")
+            self._set_note("pyserial is not installed: pip install -r requirements.txt")
+
+    def _set_note(self, text):
+        if text != self.note:
+            self.note = text
+            if text:
+                print(f"[UNO] {text}")
 
     # ------------------------------------------------------------ status
 
@@ -113,14 +123,18 @@ class UnoLink:
 
     # ------------------------------------------------------------ finding the Uno
 
-    @staticmethod
-    def _list_ports():
+    def _list_ports(self):
         if config.ARDUINO_PORT != "auto":
             return [config.ARDUINO_PORT]
         try:
-            return [p.device for p in list_ports.comports() if p.vid in _VIDS]
+            ports = list(list_ports.comports())
         except Exception:
-            return []
+            ports = []
+        found = [p.device for p in ports if p.vid in _VIDS or p.device.startswith("/dev/ttyACM")]
+        if not found:
+            seen = ", ".join(f"{p.device} ({p.vid:04x}:{p.pid:04x})" if p.vid else p.device for p in ports if "ttyAMA" not in p.device and "ttyS" not in p.device)
+            self._set_note(f"no Arduino on USB{f' (seen: {seen})' if seen else ''} - check the cable; run tools/check_uno.py")
+        return found
 
     def _open(self, path):
         s = serial.Serial()
@@ -133,8 +147,13 @@ class UnoLink:
         try:
             s = self._open(path)
         except Exception as e:
-            if config.ARDUINO_PORT != "auto":
-                print(f"[UNO] cannot open {path}: {e}")
+            msg = str(e)
+            if "ermission" in msg:
+                self._set_note(f"no permission for {path}: run 'sudo usermod -aG dialout $USER', then log out and in")
+            elif "busy" in msg.lower():
+                self._set_note(f"{path} is in use by another program (Arduino Serial Monitor? screen?) - close it")
+            else:
+                self._set_note(f"cannot open {path}: {msg}")
             self._retry_at = now + (0 if self._candidates else RETRY_SEC)
             return
         self._rx = b""
@@ -156,9 +175,13 @@ class UnoLink:
             self._rx = self._rx[self._rx.rindex(b"DGUNO"):]
             self._rx = self._rx[self._rx.find(b"\n") + 1:] if b"\n" in self._rx else b""
             self.reading = None
+            self.note = ""
             print(f"[UNO] cabin sensors connected on {path}")
             return
         if now >= deadline or self._rx == b"\n":
+            heard = self._rx.decode("ascii", "replace").strip()[-60:]
+            self._set_note(f"{path} opened but the Uno didn't answer"
+                           + (f" (it said: {heard!r} - wrong sketch or baud rate?)" if heard else " - is the DriverGuardian sketch flashed?"))
             try:
                 s.close()
             except Exception:
@@ -168,6 +191,16 @@ class UnoLink:
                 self._retry_at = now + RETRY_SEC
 
     # ------------------------------------------------------------ reading
+
+    def fan(self) -> bool:
+        """Ask the Uno for a fan burst. Never blocks; False if not connected."""
+        if self._ser is None:
+            return False
+        try:
+            self._ser.write(b"S\n")
+            return True
+        except Exception:
+            return False
 
     def _lost(self, now, why):
         print(f"[UNO] lost the cabin sensors ({why}) - searching again")

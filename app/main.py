@@ -200,6 +200,7 @@ def main():
     web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
     uno = UnoLink()                          # cabin air sensors on USB (display/record only)
+    fan_last, fan_prev_high = -1e9, False    # fan bursts on the Uno when risk turns HIGH
     reported_test = None
     paused = False
     recalibrate_requested = False
@@ -467,7 +468,7 @@ def main():
                         yolo_state=yolo.get_latest(), yolo=yolo, std_dev=std_dev, brightness=brightness,
                         perf={"fps": _r(fps_display, 1), "stages_ms": last_stages},
                         thermal=last_thermal, sysinfo=last_sysinfo,
-                        links={**health, "yolo": yolo.health(now)["state"], "uno": uno.status}, baseline=calib_baseline,
+                        links={**health, "yolo": yolo.health(now)["state"], "uno": uno.status, "uno_note": uno.note}, baseline=calib_baseline,
                         calibrating=True, paused=paused,
                         calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
                                         if calibration_start is not None else 0.0))), now)
@@ -564,6 +565,14 @@ def main():
                 # A test from the dashboard: no alerts, the car stays stopped.
                 risk, messages, debug = Risk.WAITING, [tests.title], {"case": "TEST", "score": None}
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
+            # Fan burst on the Uno: when the risk turns HIGH, and again every
+            # ARDUINO_FAN_REPEAT_SEC while it stays HIGH.
+            high = risk == Risk.HIGH
+            if config.ARDUINO_FAN_ON_HIGH and high and (not fan_prev_high or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC):
+                if uno.fan():
+                    fan_last = now
+                    recorder.log("system", "warning", "Fan burst", "Arduino fan on for 3 s (high risk)")
+            fan_prev_high = high
 
             if recorder.wants_update(now):
                 health = alerts.health(now)
@@ -579,7 +588,7 @@ def main():
                           "updates_total": risk_updates_session,
                           "camera_fps": config.CAMERA_FPS},
                     thermal=last_thermal, sysinfo=last_sysinfo,
-                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1), "uno": uno.status},
+                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1), "uno": uno.status, "uno_note": uno.note},
                     baseline=calib_baseline, paused=paused)), now)
 
             if risk == Risk.WAITING:

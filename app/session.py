@@ -336,6 +336,9 @@ class SessionRecorder:
         if changed and cabin.get("baseline"):
             self._append_event("system", "good", "Air sensors ready",
                                f"warmed up; clean-air reference MQ-3 {cabin['baseline']['mq3']:.0f}, MQ-2 {cabin['baseline']['mq2']:.0f}")
+        changed, _ = self._changed("uno_note", links.get("uno_note") or "")
+        if changed and links.get("uno_note"):
+            self._append_event("system", "warning", "Cabin sensors not connected", links["uno_note"])
         for key, label in (("esp32", "ESP32 link"), ("yolo", "Object detection"), ("uno", "Cabin sensors (Arduino)")):
             changed, old = self._changed(key, links.get(key))
             if changed:
