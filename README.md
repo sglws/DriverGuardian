@@ -221,9 +221,10 @@ recorded with every session. They do **not** change the risk level.
 | MQ-2 | smoke / LPG / gas | AO -> A1 | VCC -> 5V, GND -> GND |
 | BTS7960 | fan (cabin) | RPWM -> pin 6 | its own motor supply |
 
-When the risk turns HIGH the Pi sends `S` and the Uno runs the fan for 3 s,
-again every 10 s while HIGH lasts (`ARDUINO_FAN_ON_HIGH`,
-`ARDUINO_FAN_REPEAT_SEC` in `app/config.py`). Each burst is in the event log.
+When the driver falls asleep or has a microsleep, the Pi sends `1` and the
+Uno sets pin 6 (the fan) for 3 s, again every 10 s while it lasts
+(`ARDUINO_FAN_CASES`, `ARDUINO_FAN_REPEAT_SEC` in `app/config.py`). Each
+burst is in the event log.
 
 1. Flash `arduino/DriverGuardian_Uno/DriverGuardian_Uno.ino` with the Arduino IDE
    (board: Arduino Uno).
@@ -231,10 +232,12 @@ again every 10 s while HIGH lasts (`ARDUINO_FAN_ON_HIGH`,
    two heaters draw ~300 mA - use a powered hub if the Uno resets).
 3. `pip install -r requirements.txt` (adds `pyserial`), then run the app. The
    Pi finds the Uno on its own; the dashboard's "Cabin sensors" shows
-   **Warming up** for 2 minutes, then the readings relative to clean air.
+   **Warming up** for 30 s, then the readings relative to clean air.
 
-The sensors need their heaters warm before readings mean anything (2 minutes
-after power-on, and 24-48 h of burn-in the first time a new sensor is used).
+The sensors need their heaters warm before readings mean anything. The
+sketch waits 30 s after power-on (`WARMUP_MS`; keep `ARDUINO_WARMUP_SEC` in
+`app/config.py` equal) - 1-2 minutes gives steadier readings - and a new
+sensor needs 24-48 h of burn-in the first time it is used.
 The values are raw, not ppm - a concentration needs calibration against a
 known gas - so they are shown relative to the clean-air reading taken right
 after warm-up: start the car in clean air.

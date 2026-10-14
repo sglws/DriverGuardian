@@ -475,10 +475,11 @@ ARDUINO_ENABLED = True
 # "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_...-if00" (ls /dev/serial/by-id/)
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 115200
-ARDUINO_WARMUP_SEC = 120   # must match WARMUP_MS in the sketch
-# Fan burst on the Uno (BTS7960 on pin 6, 3 s, "S" command) when the risk turns
-# HIGH, repeated while HIGH lasts. The only thing the Uno does to the car.
-ARDUINO_FAN_ON_HIGH = True
+ARDUINO_WARMUP_SEC = 30    # must match WARMUP_MS in the sketch (30 s)
+# Pin 6 on the Uno (BTS7960 fan, 3 s burst, "1" command) when the driver falls
+# asleep or has a microsleep, repeated while it lasts. () turns it off. The
+# only thing the Uno does to the car.
+ARDUINO_FAN_CASES = ("SLEEP", "MICROSLEEP")
 ARDUINO_FAN_REPEAT_SEC = 10.0
 
 

@@ -200,7 +200,7 @@ def main():
     web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
     uno = UnoLink()                          # cabin air sensors on USB (display/record only)
-    fan_last, fan_prev_high = -1e9, False    # fan bursts on the Uno when risk turns HIGH
+    fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno for sleep / microsleep
     reported_test = None
     paused = False
     recalibrate_requested = False
@@ -565,14 +565,15 @@ def main():
                 # A test from the dashboard: no alerts, the car stays stopped.
                 risk, messages, debug = Risk.WAITING, [tests.title], {"case": "TEST", "score": None}
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
-            # Fan burst on the Uno: when the risk turns HIGH, and again every
-            # ARDUINO_FAN_REPEAT_SEC while it stays HIGH.
-            high = risk == Risk.HIGH
-            if config.ARDUINO_FAN_ON_HIGH and high and (not fan_prev_high or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC):
+            # Pin 6 on the Uno (fan) when the driver falls asleep or has a
+            # microsleep, and again every ARDUINO_FAN_REPEAT_SEC while it lasts.
+            fan_case = debug.get("case") in config.ARDUINO_FAN_CASES
+            if fan_case and (not fan_prev or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC):
                 if uno.fan():
                     fan_last = now
-                    recorder.log("system", "warning", "Fan burst", "Arduino fan on for 3 s (high risk)")
-            fan_prev_high = high
+                    recorder.log("system", "warning", "Fan burst",
+                                 f"Arduino pin 6 on for 3 s ({debug['case'].lower()})")
+            fan_prev = fan_case
 
             if recorder.wants_update(now):
                 health = alerts.health(now)

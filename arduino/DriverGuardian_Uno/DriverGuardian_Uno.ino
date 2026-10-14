@@ -1,61 +1,118 @@
 // ============================================================
-// DriverGuardian - Arduino Uno: cabin air sensors
+// DriverGuardian - Arduino Uno: cabin air sensors + fan
 // ============================================================
-// Reads the two gas sensors and reports them to the Raspberry Pi over the
-// USB cable (the same cable powers the Uno). Display and recording only:
-// the Pi shows these values on the dashboard and saves them with the
-// session; they do not change the risk level.
+// Connected to the Raspberry Pi by USB (the same cable powers the Uno).
 //
-//   MQ-3  alcohol            AO -> A0
-//   MQ-2  smoke / LPG / gas  AO -> A1
-//   both: VCC -> 5V, GND -> GND (the heaters draw ~150 mA each, which the
-//   Pi's USB port supplies; use a powered hub if the Uno browns out)
+//   MQ-3  alcohol            AO -> A0      (VCC -> 5V, GND -> GND)
+//   MQ-2  smoke / LPG / gas  AO -> A1      (VCC -> 5V, GND -> GND)
+//   BTS7960 fan driver       RPWM -> pin 6 (motor power from its own supply)
 //
-// Protocol (115200 baud, one line every REPORT_INTERVAL_MS):
+// To the Pi (115200 baud, every REPORT_INTERVAL_MS):
 //   SEN,mq3=<0-1023>,mq2=<0-1023>,warm=<0|1>,up=<seconds since power-on>
-// The Pi can ask "ID?" and the Uno answers "DGUNO,1" - so the Pi finds the
-// right USB port even when the ESP32 is plugged in too.
+// The sensor values are shown on the dashboard and recorded; they do not
+// change the risk level.
 //
-// MQ sensors need their heater warm before readings mean anything: about
-// 2 minutes after power-on (and 24-48 h "burn-in" the very first time a new
-// sensor is used). Until then warm=0 and the dashboard says so.
+// From the Pi:
+//   ID?        -> answers "DGUNO,1" (how the Pi finds this board's port)
+//   1 / S / s  -> pin 6 HIGH for BURST_DURATION (the fan). The Pi sends "1"
+//                 when the driver falls asleep or has a microsleep, and again
+//                 every 10 s while it lasts (ARDUINO_FAN_CASES in config.py).
 //
-// Raw values are not ppm: turning them into a concentration needs a
-// calibration against a known gas. The Pi reports them relative to the
-// clean-air reading taken right after warm-up.
+// Keep WARMUP_MS equal to ARDUINO_WARMUP_SEC in app/config.py.
 
-const int MQ3_PIN = A0;
-const int MQ2_PIN = A1;
+#include <Arduino.h>
 
-const unsigned long REPORT_INTERVAL_MS = 200;     // 5 reports per second
-const unsigned long WARMUP_MS = 120000UL;         // 2 minutes of heater warm-up
-const float SMOOTHING = 0.2;                      // exponential moving average weight
+// ==========================================
+// PIN DEFINITIONS
+// ==========================================
+const int RPWM_PIN = 6;      // Connected to BTS7960 RPWM (Fan / Safety Actuator)
+const int MQ3_PIN  = A0;     // MQ-3 Alcohol Sensor Analog In
+const int MQ2_PIN  = A1;     // MQ-2 Smoke/Gas Sensor Analog In
 
-float mq3Avg = -1, mq2Avg = -1;
+// ==========================================
+// TIMING & REPORTING CONFIGURATION
+// ==========================================
+const unsigned long BURST_DURATION = 3000;       // 3 seconds fan safety burst
+const unsigned long REPORT_INTERVAL_MS = 200;    // 5 reports per second to Pi
+const unsigned long WARMUP_MS = 30000UL;         // 30 s MQ heater warm-up
+const float SMOOTHING = 0.2;                     // Exponential moving average weight
+
+// ==========================================
+// STATE VARIABLES
+// ==========================================
+unsigned long motorStartTime = 0;
+bool motorRunning = false;
+
+float mq3Avg = -1;
+float mq2Avg = -1;
 unsigned long lastReport = 0;
-String rx;
+String rx = "";
 
-void setup() {
-  Serial.begin(115200);
-  pinMode(MQ3_PIN, INPUT);
-  pinMode(MQ2_PIN, INPUT);
-  Serial.println("DGUNO,1");                      // hello after a reset
-}
-
+// ==========================================
+// COMMAND HANDLER
+// ==========================================
 void handleCommand(String cmd) {
   cmd.trim();
-  if (cmd == "ID?") Serial.println("DGUNO,1");
+  if (cmd == "ID?") {
+    Serial.println("DGUNO,1");
+  }
+  else if ((cmd == "1" || cmd == "S" || cmd == "s") && !motorRunning) {
+    digitalWrite(RPWM_PIN, HIGH); // Full speed ON
+    motorStartTime = millis();
+    motorRunning = true;
+    Serial.println("HIGH RISK DETECTED: Fan activated for 3 seconds!");
+  }
 }
 
+// ==========================================
+// SETUP
+// ==========================================
+void setup() {
+  // Unified baud rate for Pi communication and sensor streaming
+  Serial.begin(115200);
+
+  // Configure pins
+  pinMode(RPWM_PIN, OUTPUT);
+  digitalWrite(RPWM_PIN, LOW); // Fail-safe: OFF at boot
+
+  pinMode(MQ3_PIN, INPUT);
+  pinMode(MQ2_PIN, INPUT);
+
+  // Hello signal after reset for Pi port identification
+  Serial.println("DGUNO,1");
+}
+
+// ==========================================
+// MAIN LOOP
+// ==========================================
 void loop() {
-  // commands from the Pi (non-blocking)
+  // ------------------------------------------
+  // 1. NON-BLOCKING SERIAL COMMAND PROCESSING
+  // ------------------------------------------
   while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\n') { handleCommand(rx); rx = ""; }
-    else if (c != '\r' && rx.length() < 32) rx += c;
+    if (c == '\n') {
+      handleCommand(rx);
+      rx = "";
+    } else if (c != '\r' && rx.length() < 32) {
+      rx += c;
+    }
   }
 
   unsigned long now = millis();
+
+  // ------------------------------------------
+  // 2. HANDLE THE 3-SECOND FAN SAFETY TIMER
+  // ------------------------------------------
+  if (motorRunning && (now - motorStartTime >= BURST_DURATION)) {
+    digitalWrite(RPWM_PIN, LOW); // Turn fan OFF
+    motorRunning = false;
+    Serial.println("Burst complete. Fan turned OFF.");
+  }
+
+  // ------------------------------------------
+  // 3. SENSOR REPORTING INTERVAL (Every 200ms)
+  // ------------------------------------------
   if (now - lastReport < REPORT_INTERVAL_MS) return;
   lastReport = now;
 

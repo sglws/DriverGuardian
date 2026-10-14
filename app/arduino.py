@@ -8,8 +8,8 @@ Display and recording only: nothing here changes the risk level.
 Wire protocol (115200 baud, ~5 lines a second from the Uno):
     SEN,mq3=<0-1023>,mq2=<0-1023>,warm=<0|1>,up=<seconds since power-on>
 The Pi asks "ID?" and the Uno answers "DGUNO,1" (it also says so after a
-reset). "S" asks the Uno for a fan burst (BTS7960 on pin 6, 3 s) - sent
-when the risk turns HIGH (ARDUINO_FAN_ON_HIGH). Other lines from the Uno
+reset). "1" sets the Uno's pin 6 (BTS7960 fan) for a 3 s burst - sent when
+the driver falls asleep or has a microsleep (ARDUINO_FAN_CASES). Other lines from the Uno
 are ignored.
 
 Never blocks the main loop - the same pattern as the ESP32 link
@@ -193,11 +193,11 @@ class UnoLink:
     # ------------------------------------------------------------ reading
 
     def fan(self) -> bool:
-        """Ask the Uno for a fan burst. Never blocks; False if not connected."""
+        """Pin 6 on the Uno for a 3 s burst ("1"). Never blocks; False if not connected."""
         if self._ser is None:
             return False
         try:
-            self._ser.write(b"S\n")
+            self._ser.write(b"1\n")
             return True
         except Exception:
             return False
