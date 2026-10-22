@@ -1,7 +1,7 @@
-description: Ultralytics YOLO26n model trained on /content/data.yaml
+description: Ultralytics YOLO26n model trained on /content/dataset/data.yaml
 author: Ultralytics
-date: '2026-09-03T14:24:15.993790+03:00'
-version: 8.4.106
+date: '2026-10-22T20:46:28.884545+03:00'
+version: 8.4.163
 license: AGPL-3.0 License (https://ultralytics.com/license)
 docs: https://docs.ultralytics.com
 stride: 32
