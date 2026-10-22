@@ -295,8 +295,8 @@ YOLO_CONF_THRESHOLD = 0.20
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.25,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.37,     # already working well at this level - don't disturb
-    "cigarette": 0.35,    # same as seatbelt - don't disturb
+    "seatbelt": 0.25,     # lowered from 0.37 (the belt was being missed)
+    "cigarette": 0.35,    # working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
 YOLO_IMG_SIZE = 640
@@ -361,6 +361,9 @@ YOLO_CONFIRM_MIN = 2
 # then turned out too tight the other way (a bottle genuinely being raised
 # to drink wasn't counting) - nudged up modestly, not back toward 3.5.
 MOUTH_PROXIMITY_RADIUS_MULT = 1.5
+# Drinking gets a wider zone: a bottle or cup tilted up to the lips is long,
+# so the center of its box sits well away from the mouth even mid-sip.
+DRINK_MOUTH_RADIUS_MULT = 2.5
 
 # COCO class names (pretrained yolo11n.pt) that approximate our target behaviors
 # until the fine-tuned model (Phase 11) with real "phone/seatbelt/cigarette/food"
@@ -475,7 +478,7 @@ ARDUINO_ENABLED = True
 # "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_...-if00" (ls /dev/serial/by-id/)
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 115200
-ARDUINO_WARMUP_SEC = 30    # must match WARMUP_MS in the sketch (30 s)
+ARDUINO_WARMUP_SEC = 30   # must match WARMUP_MS in the sketch
 # Pin 6 on the Uno (BTS7960 fan, 3 s burst, "1" command) when the driver falls
 # asleep or has a microsleep, repeated while it lasts. () turns it off. The
 # only thing the Uno does to the car.

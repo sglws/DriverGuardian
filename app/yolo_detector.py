@@ -210,8 +210,11 @@ class YoloDetector:
         if boxes is None:
             return result
 
-        def near_mouth(box) -> bool:
-            return mouth_roi is None or utils.box_near_point(box, *mouth_roi)
+        def near_mouth(box, radius_mult=config.MOUTH_PROXIMITY_RADIUS_MULT) -> bool:
+            if mouth_roi is None:
+                return True
+            cx, cy, radius = mouth_roi
+            return utils.box_near_point(box, cx, cy, radius * radius_mult / config.MOUTH_PROXIMITY_RADIUS_MULT)
 
         def passes(category: str, conf: float) -> bool:
             # raw_boxes always gets every box regardless (diagnostic
@@ -248,7 +251,9 @@ class YoloDetector:
                     # Drinking and Eating merged - see the merge note by
                     # COCO_CONSUMPTION_CLASSES in config.py.
                     if passes("consumption", conf):
-                        counted = near_mouth((x1, y1, x2, y2))
+                        drinking = "drink" in name or "bottle" in name or "cup" in name
+                        counted = near_mouth((x1, y1, x2, y2),
+                                             config.DRINK_MOUTH_RADIUS_MULT if drinking else config.MOUTH_PROXIMITY_RADIUS_MULT)
                         result["consumption"] = result["consumption"] or counted
                 elif "cigarette" in name or "smoking" in name:
                     if passes("cigarette", conf):
