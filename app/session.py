@@ -302,12 +302,15 @@ class SessionRecorder:
               and not s.get("calibrating") and case not in ("PAUSED", "TEST")):
             self._logged_risk = (risk, case)
             if risk == "WAITING":
-                title = "Waiting for seatbelt" if case == "PRE_DRIVE" else "Waiting"
+                title = {"PRE_DRIVE": "Waiting for seatbelt", "ALCOHOL_CHECK": "Preparing the alcohol test",
+                         "ALCOHOL_BLOW": "Alcohol test: blow",
+                         "ALCOHOL_BLOW_AGAIN": "Alcohol test: no breath, blow again", "ALCOHOL": "Alcohol detected - drive blocked"}.get(case, "Waiting")
             else:
                 title = f"{risk.title()} risk"
                 if case not in ("NONE", None):
                     title += ": " + case.replace("_", " ").lower()
-            self._append_event("risk", _RISK_LEVEL.get(risk, "info"), title,
+            level = "critical" if case == "ALCOHOL" else _RISK_LEVEL.get(risk, "info")
+            self._append_event("risk", level, title,
                                " / ".join((s.get("messages") or [])[:2]), ts=self._pending_risk[3])
             self._episode_change(risk, case, self._pending_risk[3])
             if risk in ("LOW", "MEDIUM", "HIGH") and case not in ("NONE", None):

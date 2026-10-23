@@ -86,9 +86,11 @@ const CASES = {
   NONE: "All clear", MICROSLEEP: "Eyes closing", SLEEP: "Driver asleep", YAWN: "Yawning",
   LEAN: "Head leaning", LEAN_PROLONGED: "Prolonged head lean", TURN: "Looking away",
   TURN_PROLONGED: "Prolonged look-away", SEATBELT: "Seatbelt off", PHONE: "Phone use",
-  PHONE_REPEAT: "Repeated phone use", CONSUMPTION: "Eating, drinking or smoking",
-  CONSUMPTION_REPEAT: "Repeated eating, drinking or smoking", BLOCKED: "Camera blocked",
-  ABSENT: "Driver not in seat", PRE_DRIVE: "Waiting for seatbelt", CALIBRATING: "Calibrating",
+  PHONE_REPEAT: "Repeated phone use", CONSUMPTION: "Eating or drinking",
+  CONSUMPTION_REPEAT: "Repeated eating or drinking", SMOKING: "Smoking", BLOCKED: "Camera blocked",
+  ABSENT: "Driver not in seat", PRE_DRIVE: "Waiting for seatbelt", ALCOHOL_CHECK: "Preparing the alcohol test",
+  ALCOHOL_BLOW: "Alcohol test: blow", ALCOHOL_BLOW_AGAIN: "No breath: blow again", ALCOHOL: "Alcohol detected", ALCOHOL_DRIVE: "Alcohol in the cabin",
+  CALIBRATING: "Calibrating",
   PAUSED: "Monitoring paused", TEST: "Test running",
 };
 const caseName = (c) => CASES[c] || (c ? c.replace(/_/g, " ").toLowerCase() : "—");
@@ -627,14 +629,14 @@ function renderChips() {
   rows.push(["driver", "user", "Driver", pres === "DRIVER_PRESENT" ? "Present" : pres === "DRIVER_ABSENT" ? "Not in seat" : pres === "CAMERA_BLOCKED" ? "Camera blocked" : "—",
     s.face_found ? "face tracked" : "no face", pres && pres !== "DRIVER_PRESENT" ? "crit" : pres ? "ok" : ""]);
   rows.push(["cam", "sun", "Lighting", cam.low_light ? "Low light" : "Normal", `brightness ${cam.brightness != null ? cam.brightness : "—"}${cam.low_light ? ", enhanced" : ""}`, cam.low_light ? "warn" : ""]);
-  // cabin air sensors on the Arduino Uno (shown and recorded; they don't change the risk)
+  // cabin air sensors on the Arduino Uno (MQ-3: alcohol check before the drive; MQ-2: smoking)
   const cab = s.cabin, unoOn = s.links && s.links.uno === "connected";
   const air = (key, label, ic) => {
     if (!cab) return [key, ic, label, unoOn ? "No reading yet" : "Not connected", unoOn ? "" : (s.links && s.links.uno_note) || "Arduino Uno on USB", unoOn ? "" : "warn"];
     if (!cab.warm) return [key, ic, label, "Warming up", `${duration(cab.warmup_left_s)} left, raw ${cab[key]}`, ""];
     const rel = cab[`${key}_rel`];
     return [key, ic, label, rel == null ? "Measuring clean air" : `${fmt(rel, 2)}× clean air`, `raw ${cab[key]}, ${fmt(cab[`${key}_v`], 2)} V`,
-      rel != null && rel >= 1.5 ? "warn" : "ok"];
+      rel != null && rel >= ((cab.limits && cab.limits[key]) || 1.5) ? "warn" : "ok"];
   };
   rows.push(air("mq3", "Alcohol (MQ-3)", "bottle"), air("mq2", "Smoke, gas (MQ-2)", "smoke"));
   // One line per signal; the ones that need attention are marked.

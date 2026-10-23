@@ -3,7 +3,8 @@ arduino.py
 ----------
 The Arduino Uno with the cabin air sensors - MQ-3 (alcohol) and MQ-2
 (smoke / gas) - on a USB cable. Sketch: arduino/DriverGuardian_Uno.
-Display and recording only: nothing here changes the risk level.
+This module only reads them; the risk engine uses the readings for the
+alcohol check before the drive (MQ-3) and for smoking (MQ-2).
 
 Wire protocol (115200 baud, ~5 lines a second from the Uno):
     SEN,mq3=<0-1023>,mq2=<0-1023>,warm=<0|1>,up=<seconds since power-on>
@@ -23,10 +24,12 @@ ARDUINO_PORT to the Uno's fixed path instead (ls /dev/serial/by-id/), so
 the search never opens - and possibly resets - the ESP32.
 
 MQ readings are raw ADC values, not ppm (a concentration needs calibration
-against a known gas). They are reported relative to the clean-air reading
-taken in the first seconds after the heaters have warmed up.
+against a known gas). They are reported relative to a clean-air reference:
+the average of the first AIR_REF_INIT_SEC once the heaters are warm, which
+then follows clean air (see AIR_REF_* in config.py).
 """
 
+import os
 import time
 
 from app import config
@@ -42,8 +45,22 @@ _VIDS = {0x2341, 0x2A03, 0x1A86, 0x0403, 0x067B}
 PROBE_SEC = 3.0        # an Uno reboots when its port opens; its hello comes ~2 s later
 RETRY_SEC = 5.0        # wait before searching again after no Uno was found
 STALE_SEC = 5.0        # connected but silent this long -> treat as unplugged
-BASELINE_SEC = 10.0    # clean-air reference: the first 10 s after warm-up
 ADC_VOLTS = 5.0 / 1023
+
+
+def powered_since(path, now):
+    """When the Uno - and the MQ heaters on its 5 V - got power, as a
+    time.monotonic() value: when its USB serial port appeared (the device
+    file's ctime), but never before the computer booted, in case the clock
+    was set after boot (no RTC battery) and the file looks older than it is.
+    Opening the port resets the Uno, so its own up-time can't tell."""
+    try:
+        age = time.time() - os.stat(os.path.realpath(path)).st_ctime
+    except OSError:
+        return now
+    if hasattr(time, "CLOCK_BOOTTIME"):
+        age = min(age, time.clock_gettime(time.CLOCK_BOOTTIME))
+    return now - max(0.0, age)
 
 
 class UnoLink:
@@ -55,8 +72,9 @@ class UnoLink:
         self._rx = b""
         self.port = None
         self.reading, self.reading_at = None, None
+        self.powered_since = None      # when the Uno got power (time.monotonic())
         self._base_samples = {"mq3": [], "mq2": []}
-        self._base_started = None
+        self._base_started = self._base_at = None
         self.baseline = None
         self.note = ""                 # why it isn't connected, for the dashboard
         if config.ARDUINO_ENABLED and serial is None:
@@ -89,10 +107,19 @@ class UnoLink:
             "mq3": r["mq3"], "mq2": r["mq2"],
             "mq3_v": round(r["mq3"] * ADC_VOLTS, 2), "mq2_v": round(r["mq2"] * ADC_VOLTS, 2),
             "mq3_rel": rel("mq3"), "mq2_rel": rel("mq2"),
-            "warm": r["warm"], "warmup_left_s": max(0, config.ARDUINO_WARMUP_SEC - r["up"]) if not r["warm"] else 0,
-            "baseline": dict(base) if base else None,
+            "warm": self._warm(now), "warmup_left_s": round(self._warmup_left(now)),
+            "baseline": {k: round(v, 1) for k, v in base.items()} if base else None,
+            "limits": {"mq3": config.ALCOHOL_RATIO, "mq2": config.SMOKE_RATIO_ON},
             "age_s": round(now - self.reading_at, 2), "port": self.port,
         }
+
+    def _warmup_left(self, now):
+        if self.powered_since is None:
+            return config.ARDUINO_WARMUP_SEC
+        return max(0.0, config.ARDUINO_WARMUP_SEC - (now - self.powered_since))
+
+    def _warm(self, now):
+        return self.powered_since is not None and self._warmup_left(now) == 0
 
     # ------------------------------------------------------------ main loop
 
@@ -176,7 +203,11 @@ class UnoLink:
             self._rx = self._rx[self._rx.find(b"\n") + 1:] if b"\n" in self._rx else b""
             self.reading = None
             self.note = ""
-            print(f"[UNO] cabin sensors connected on {path}")
+            self.powered_since = powered_since(path, now)
+            self.baseline = self._base_started = None
+            left = self._warmup_left(now)
+            print(f"[UNO] cabin sensors connected on {path}"
+                  + (f" - MQ heaters warming up, {left:.0f} s left" if left else " - MQ heaters already warm"))
             return
         if now >= deadline or self._rx == b"\n":
             heard = self._rx.decode("ascii", "replace").strip()[-60:]
@@ -233,19 +264,37 @@ class UnoLink:
             self._track_baseline(r, now)
 
     def _track_baseline(self, r, now):
-        if not r["warm"]:                          # still heating (or the Uno restarted)
+        if not self._warm(now):                    # heaters still warming up
             self._base_samples = {"mq3": [], "mq2": []}
             self._base_started, self.baseline = None, None
             return
-        if self.baseline is not None:
+        if self.baseline is None:                  # first reference: a short average
+            if self._base_started is None:
+                self._base_started = now
+                self._base_samples = {"mq3": [], "mq2": []}
+            for k in ("mq3", "mq2"):
+                self._base_samples[k].append(r[k])
+            if now - self._base_started >= config.AIR_REF_INIT_SEC:
+                self.baseline = {k: sum(v) / len(v) for k, v in self._base_samples.items() if v}
+                self._base_at = now
+                print(f"[UNO] clean-air reference: MQ-3 {self.baseline['mq3']:.0f}, MQ-2 {self.baseline['mq2']:.0f}")
+                for k, limit, name in (("mq3", config.ALCOHOL_RAW_LIMIT, "ALCOHOL_RAW_LIMIT"),
+                                       ("mq2", config.SMOKE_RAW_LIMIT, "SMOKE_RAW_LIMIT")):
+                    if limit is not None and self.baseline[k] >= 0.8 * limit:
+                        print(f"[UNO] WARNING: the {k.upper()} reference ({self.baseline[k]:.0f}) is close to "
+                              f"{name} ({limit}) - gas in the air now, or set {name} higher in config.py")
             return
-        if self._base_started is None:
-            self._base_started = now
+        # Then follow clean air: down quickly, up slowly, frozen while a gas is present.
+        dt, self._base_at = now - self._base_at, now
         for k in ("mq3", "mq2"):
-            self._base_samples[k].append(r[k])
-        if now - self._base_started >= BASELINE_SEC:
-            self.baseline = {k: sum(v) / len(v) for k, v in self._base_samples.items() if v}
-            print(f"[UNO] clean-air reference: MQ-3 {self.baseline['mq3']:.0f}, MQ-2 {self.baseline['mq2']:.0f}")
+            b, x = self.baseline[k], r[k]
+            if x < b:
+                tau = config.AIR_REF_DOWN_SEC
+            elif x < b * config.AIR_REF_FREEZE_RATIO:
+                tau = config.AIR_REF_UP_SEC
+            else:
+                continue
+            self.baseline[k] = b + min(1.0, dt / tau) * (x - b)
 
 
 def parse_line(raw: bytes):

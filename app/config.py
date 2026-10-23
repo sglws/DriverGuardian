@@ -230,8 +230,8 @@ EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
 # --------------------------------------------------------------------------
 # Pre-drive readiness check (startup gate)
 # --------------------------------------------------------------------------
-# One condition gates the start of monitoring: the seatbelt is confirmed
-# fastened. Driver presence isn't part of it - calibration runs immediately
+# Two conditions gate the start of monitoring. First, the seatbelt is
+# confirmed fastened. Driver presence isn't part of it - calibration runs immediately
 # before and cannot finish without a face, so the driver is already known to
 # be seated.
 #
@@ -254,7 +254,30 @@ EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
 # (SEATBELT_UNWORN_ESCALATE_SEC, presence handling, etc.) own the behaviour,
 # so unbuckling later is a seatbelt violation rather than a failed startup.
 # Pressing 'r' to recalibrate re-arms it, since that restarts the session.
+#
+# Second condition: an alcohol breath test (MQ-3 on the Arduino Uno - see
+# app/cabin_air.py), after the belt. Once the MQ-3 is warm and has its
+# clean-air reference, the voice asks the driver to blow towards the sensor,
+# freely. The test ends as soon as a breath is seen - the MQ-3 rose to
+# ALCOHOL_BREATH_RISE x the reference and then stopped rising for
+# ALCOHOL_BREATH_SETTLE_SEC, so it is judged on the full peak. With no
+# breath within ALCOHOL_BLOW_MAX_SEC it asks again: not blowing never starts
+# the drive. A peak at ALCOHOL_RATIO x the reference or
+# more (or a raw reading at ALCOHOL_RAW_LIMIT) fails it: the drive can't
+# start, and the test repeats after ALCOHOL_RETEST_SEC. With no alcohol
+# sensor - the Uno not found within ALCOHOL_UNO_WAIT_SEC, or an MQ-3 that
+# reads next to nothing - only the seatbelt is checked, so a missing sensor
+# can't block the app.
 PRE_DRIVE_CHECK_ENABLED = True
+ALCOHOL_CHECK_ENABLED = True
+ALCOHOL_RATIO = 1.5            # MQ-3 at this multiple of the clean-air reference or more -> alcohol
+ALCOHOL_RAW_LIMIT = 700        # ...or at this raw reading (0-1023), whatever the reference says
+ALCOHOL_BREATH_RISE = 1.05     # a breath raises the MQ-3 at least this much (x the reference)
+ALCOHOL_BREATH_SETTLE_SEC = 2.0  # no new peak for this long -> the breath is over
+ALCOHOL_BLOW_MAX_SEC = 10.0    # no breath seen in this long -> "No breath detected", ask again
+ALCOHOL_RETEST_SEC = 30.0      # after a failed test, test again this much later
+ALCOHOL_UNO_WAIT_SEC = 8.0     # how long to look for the Uno (it takes a few seconds to answer)
+ALCOHOL_SENSOR_MIN_RAW = 15    # MQ-3 clean-air reading below this (0-1023) = no sensor on A0
 
 # --------------------------------------------------------------------------
 # Presence / camera obstruction (Phase 2 + risk engine)
@@ -329,7 +352,7 @@ YOLO_INTERVAL_SEC = 0.4
 # is doing on its own, uncapped, every single frame.
 YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 2)
 PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
-CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking/smoking detection -> escalate
+CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking detection -> escalate
 SEATBELT_UNWORN_ESCALATE_SEC = 10.0
 
 # Some fine-tuned models (e.g. this project's current best.pt) only have a
@@ -471,19 +494,49 @@ ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing d
 
 # Arduino Uno with the cabin air sensors (MQ-3 alcohol, MQ-2 smoke/gas) on a
 # USB cable - sketch in arduino/DriverGuardian_Uno, link in app/arduino.py.
-# Shown on the dashboard and recorded only; it does not change the risk.
+# Shown on the dashboard and recorded. The MQ-3 gates the start of the drive
+# (ALCOHOL_* above); the MQ-2 is the second way of detecting smoking (below).
 ARDUINO_ENABLED = True
 # "auto" searches Arduino / CH340 USB ports for the Uno. If the ESP32 is also
 # on a Pi USB port, give the Uno's fixed path instead, e.g.
 # "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_...-if00" (ls /dev/serial/by-id/)
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 115200
-ARDUINO_WARMUP_SEC = 30   # must match WARMUP_MS in the sketch
+# MQ heater warm-up, counted on the Pi from when the Uno got power (its USB
+# port appeared) - opening the port resets the Uno, so the sketch's own
+# warm-up flag restarts every time the app starts and isn't used here.
+ARDUINO_WARMUP_SEC = 30
+# The clean-air reference each reading is divided by (mq3_rel / mq2_rel):
+# the average of the first AIR_REF_INIT_SEC once warm, then it follows clean
+# air - down quickly (AIR_REF_DOWN_SEC), up slowly (AIR_REF_UP_SEC), and not
+# at all while a reading is AIR_REF_FREEZE_RATIO x above it, so alcohol or
+# smoke never becomes the new "clean air". Slow changes (temperature, outside
+# air drifting in) are absorbed; a fast rise, like a cigarette, stands out.
+AIR_REF_INIT_SEC = 10.0
+AIR_REF_DOWN_SEC = 30.0
+AIR_REF_UP_SEC = 300.0
+AIR_REF_FREEZE_RATIO = 1.2
 # Pin 6 on the Uno (BTS7960 fan, 3 s burst, "1" command) when the driver falls
 # asleep or has a microsleep, repeated while it lasts. () turns it off. The
 # only thing the Uno does to the car.
 ARDUINO_FAN_CASES = ("SLEEP", "MICROSLEEP")
 ARDUINO_FAN_REPEAT_SEC = 10.0
+# Smoking (LOW risk, its own voice alert) is detected either by the camera
+# (the model's Smoking class, near the mouth) or by smoke in the cabin air:
+# the MQ-2 at SMOKE_RATIO_ON x its clean-air reference (or SMOKE_RAW_LIMIT)
+# for SMOKE_CONFIRM_SEC, rising more than the MQ-3 (otherwise it's alcohol
+# vapour - see app/cabin_air.py). It clears once the MQ-2 falls below
+# SMOKE_RATIO_OFF - lower than the "on" level so a reading hovering at the
+# limit doesn't flicker on and off.
+SMOKE_RATIO_ON = 1.5
+SMOKE_RATIO_OFF = 1.3
+SMOKE_RAW_LIMIT = 700
+SMOKE_CONFIRM_SEC = 2.0
+# Alcohol during the drive (MEDIUM risk): the MQ-3 at ALCOHOL_RATIO (or
+# ALCOHOL_RAW_LIMIT) for ALCOHOL_DRIVE_CONFIRM_SEC, rising more than the MQ-2;
+# it clears below ALCOHOL_DRIVE_CLEAR_RATIO.
+ALCOHOL_DRIVE_CONFIRM_SEC = 3.0
+ALCOHOL_DRIVE_CLEAR_RATIO = 1.3
 
 
 # --------------------------------------------------------------------------

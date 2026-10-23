@@ -50,9 +50,15 @@ from app.risk_engine import Risk
 # case code -> (phrase, repeat interval in seconds while that case stays active)
 PROMPTS = {
     "PRE_DRIVE":      ("Please put on your seatbelt. The drive will start once it is on.", 20.0),
+    "ALCOHOL_CHECK":  ("Preparing the alcohol test. Please wait.", 60.0),
+    "ALCOHOL_BLOW":   ("Alcohol test. Please blow towards the sensor.", 10.0),
+    "ALCOHOL_BLOW_AGAIN": ("No breath detected. Please blow towards the sensor.", 10.0),
+    "ALCOHOL":        ("Alcohol detected. The drive cannot start.", 15.0),
+    "ALCOHOL_DRIVE":  ("Alcohol detected in the cabin. Please stop when it is safe.", 30.0),
     "SEATBELT":       ("Your seatbelt is off. Please put it back on.", 15.0),
     "PHONE":          ("Please put your phone away.", 8.0),
-    "CONSUMPTION":    ("Please keep your focus on the road.", 15.0),
+    "SMOKING":        ("Smoking detected. Please do not smoke while driving.", 30.0),
+    "CONSUMPTION":    ("Eating or drinking detected. Please keep your hands and focus on driving.", 15.0),
     "TURN":           ("Please keep your eyes on the road.", 6.0),
     "LEAN":           ("Please sit upright.", 6.0),
     "MICROSLEEP":     ("Stay alert.", 5.0),

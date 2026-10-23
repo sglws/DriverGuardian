@@ -199,7 +199,7 @@ def main():
     recorder.start()
     web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
-    uno = UnoLink()                          # cabin air sensors on USB (display/record only)
+    uno = UnoLink()                          # cabin air sensors on USB (alcohol check, smoke)
     fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno for sleep / microsleep
     reported_test = None
     paused = False
@@ -552,10 +552,15 @@ def main():
             # seatbelt_supported: the pre-drive gate can only demand a
             # confirmed belt when the loaded model actually has that class -
             # the COCO-pretrained fallback does not (see yolo_detector).
+            # cabin: the Uno's MQ-3 / MQ-2 readings - the alcohol check before
+            # the drive and the smoke half of smoking detection.
             risk, messages, debug = risk_engine.evaluate(
                 now, presence, drowsy_state, pose_state, yolo_state,
                 seatbelt_supported=yolo.using_finetuned,
+                cabin=uno.state(now), uno_status=uno.status,
             )
+            for level, title, detail in risk_engine.pop_events():   # alcohol test passed / failed
+                recorder.log("system", level, title, detail)
             if paused:
                 # Paused from the dashboard: everything keeps running (video,
                 # detection) but nothing is classified or alerted; the ESP32

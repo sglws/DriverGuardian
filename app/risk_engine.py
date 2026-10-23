@@ -18,6 +18,7 @@ scoring math.
 from enum import Enum
 
 from app import config
+from app.cabin_air import AirWatch, BreathTest
 from app.drowsiness import DrowsinessLevel
 
 
@@ -52,16 +53,25 @@ class RiskEngine:
         # the check is disabled it starts satisfied, so the flag always means
         # "the gate is not holding anything back".
         self.pre_drive_passed = not config.PRE_DRIVE_CHECK_ENABLED
+        self.breath = BreathTest()        # the alcohol part of the pre-drive gate (MQ-3)
+        self.air = AirWatch()             # alcohol and smoke in the cabin during the drive
 
     def reset_pre_drive(self):
         """Re-arm the startup gate - called when the session restarts
         (recalibrate), so the check is re-verified rather than inherited
         from the previous session."""
         self.pre_drive_passed = not config.PRE_DRIVE_CHECK_ENABLED
+        self.breath.reset()
+
+    def pop_events(self):
+        """Results worth a line in the session log (the alcohol test)."""
+        events, self.breath.events = self.breath.events, []
+        return events
 
     def evaluate(self, now, presence: PresenceState,
                  drowsiness_state: dict, head_pose_state: dict,
-                 yolo_state: dict, seatbelt_supported: bool = True):
+                 yolo_state: dict, seatbelt_supported: bool = True,
+                 cabin: dict = None, uno_status: str = "disabled"):
         """
         Returns (Risk, list[str] status_messages, dict debug_info).
 
@@ -74,7 +84,8 @@ class RiskEngine:
         _CASE_PRIORITY below.
         """
         # ---- Pre-drive readiness gate (runs before everything else) ----
-        # One condition: the seatbelt is confirmed fastened. Driver presence
+        # Two conditions: the seatbelt is confirmed fastened, then the alcohol
+        # breath test passes (see cabin_air.BreathTest). Driver presence
         # is NOT re-checked here - calibration runs immediately before this
         # and can't complete without a face, so the driver is already known
         # to be seated by the time this code is reachable.
@@ -94,12 +105,19 @@ class RiskEngine:
             # simply never seeing a belt at all.
             if seatbelt_supported and yolo_state.get("seatbelt_off") is not False:
                 return Risk.WAITING, ["Waiting for seatbelt"], {"case": "PRE_DRIVE"}
+            # Then the alcohol breath test (MQ-3, see cabin_air.BreathTest).
+            # With no alcohol sensor it's skipped and the seatbelt alone decides.
+            waiting, alcohol_skipped = self.breath.update(now, cabin, uno_status)
+            if waiting:
+                case, message = waiting
+                return Risk.WAITING, [message], {"case": case}
             self.pre_drive_passed = True
             # Names only what was actually verified - claiming a fastened belt
             # while the belt check was skipped would be worse than silence.
-            print("[pre-drive] monitoring active" + (
-                "" if seatbelt_supported else
-                " (SEATBELT CHECK SKIPPED - loaded model has no seatbelt class)"))
+            skipped = [] if seatbelt_supported else ["SEATBELT CHECK SKIPPED - loaded model has no seatbelt class"]
+            if alcohol_skipped:
+                skipped.append(f"ALCOHOL CHECK SKIPPED - {alcohol_skipped}")
+            print("[pre-drive] monitoring active" + (f" ({'; '.join(skipped)})" if skipped else ""))
 
         # ---- Instant HIGH overrides ----
         if presence == PresenceState.CAMERA_BLOCKED:
@@ -189,22 +207,38 @@ class RiskEngine:
                 case_candidates.append((5, "PHONE"))
         self.phone_prev_active = phone_active
 
-        consumption_active = bool(yolo_state.get("consumption") or yolo_state.get("cigarette"))
+        # Cabin air during the drive (MQ-3 / MQ-2 on the Uno, cabin_air.AirWatch).
+        # Alcohol: MEDIUM - the breath test passed, but alcohol is in the car now.
+        alcohol_air, smoke_air = self.air.update(now, cabin)
+        if alcohol_air:
+            score += config.SCORE_MEDIUM_MIN
+            messages.append("Alcohol in the cabin (MQ-3)")
+            case_candidates.append((4, "ALCOHOL_DRIVE"))
+
+        # Smoking: LOW, from either source - the camera (Smoking class near
+        # the mouth) or smoke in the cabin air (MQ-2).
+        smoke_camera = bool(yolo_state.get("cigarette"))
+        if smoke_camera or smoke_air:
+            score += config.SCORE_LOW_MIN
+            messages.append("Smoking" if smoke_camera else "Smoke in the cabin (MQ-2)")
+            case_candidates.append((6, "SMOKING"))
+
+        consumption_active = bool(yolo_state.get("consumption"))
         if consumption_active:
             score += 1
             if not self.consumption_prev_active:
                 self.consumption_hits += 1
                 if self.consumption_hits >= config.CONSUMPTION_REPEAT_TRIGGER:
                     score += 1
-                    messages.append("Repeated eating/drinking/smoking")
+                    messages.append("Repeated eating/drinking")
                     self.consumption_hits = 0
-                    case_candidates.append((6, "CONSUMPTION_REPEAT"))
+                    case_candidates.append((7, "CONSUMPTION_REPEAT"))
                 else:
-                    messages.append("Eating/drinking/smoking")
-                    case_candidates.append((6, "CONSUMPTION"))
+                    messages.append("Eating/drinking")
+                    case_candidates.append((7, "CONSUMPTION"))
             else:
-                messages.append("Eating/drinking/smoking")
-                case_candidates.append((6, "CONSUMPTION"))
+                messages.append("Eating/drinking")
+                case_candidates.append((7, "CONSUMPTION"))
         self.consumption_prev_active = consumption_active
 
         # Yawning: a weaker fatigue signal than sustained eye closure or a
@@ -215,7 +249,7 @@ class RiskEngine:
         if drowsiness_state["is_yawning"] or drowsiness_state["yawn_rate"] >= config.YAWN_RATE_DROWSY_THRESHOLD:
             score += config.SCORE_LOW_MIN
             messages.append("Yawning - signs of fatigue")
-            case_candidates.append((7, "YAWN"))
+            case_candidates.append((8, "YAWN"))
 
         # ---- Map combined score to a risk tier ----
         if score >= config.SCORE_HIGH_MIN:
