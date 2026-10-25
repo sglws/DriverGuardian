@@ -15,8 +15,8 @@
 // From the Pi:
 //   ID?        -> answers "DGUNO,1" (how the Pi finds this board's port)
 //   1 / S / s  -> pin 6 HIGH for BURST_DURATION (the fan). The Pi sends "1"
-//                 when the driver falls asleep or has a microsleep, and again
-//                 every 10 s while it lasts (ARDUINO_FAN_CASES in config.py).
+//                 when the driver has been asleep (eyes closed) for 3 s, and
+//                 again every 10 s while it lasts (ARDUINO_FAN_SLEEP_SEC in config.py).
 //
 // Keep WARMUP_MS equal to ARDUINO_WARMUP_SEC in app/config.py.
 

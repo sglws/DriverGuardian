@@ -36,6 +36,14 @@ FACE_DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "blaze_face_short_range.tfli
 # --------------------------------------------------------------------------
 # Camera (Phase 1)
 # --------------------------------------------------------------------------
+# Which camera: "auto" = the Pi's CSI camera when picamera2 is installed,
+# otherwise a USB webcam; "csi" = always the CSI camera; "usb" = a USB webcam
+# even on the Pi (e.g. a Logitech, to compare with the IR camera). Override
+# for one run with DG_CAMERA=usb / csi / auto.
+CAMERA_SOURCE = "auto"
+# USB webcam number. On a Pi 5 the first /dev/videoN belong to the camera
+# hardware, so with CAMERA_SOURCE = "usb" the USB webcam is found by itself
+# on Linux and this is only used elsewhere (laptops: 0 = built-in camera).
 CAMERA_INDEX = 0
 FRAME_WIDTH = 1280
 FRAME_HEIGHT = 720
@@ -318,7 +326,7 @@ YOLO_CONF_THRESHOLD = 0.20
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.25,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.25,     # lowered from 0.37 (the belt was being missed)
+    "seatbelt": 0.50,     # set to 0.50 (was 0.37, then 0.25)
     "cigarette": 0.35,    # working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
@@ -516,10 +524,11 @@ AIR_REF_INIT_SEC = 10.0
 AIR_REF_DOWN_SEC = 30.0
 AIR_REF_UP_SEC = 300.0
 AIR_REF_FREEZE_RATIO = 1.2
-# Pin 6 on the Uno (BTS7960 fan, 3 s burst, "1" command) when the driver falls
-# asleep or has a microsleep, repeated while it lasts. () turns it off. The
-# only thing the Uno does to the car.
-ARDUINO_FAN_CASES = ("SLEEP", "MICROSLEEP")
+# Pin 6 on the Uno (BTS7960 seat vibration, 3 s burst, "1" command) when the
+# driver is asleep and the eyes have been closed for ARDUINO_FAN_SLEEP_SEC -
+# not for a microsleep - repeated every ARDUINO_FAN_REPEAT_SEC while it lasts.
+# None turns it off. The only thing the Uno does to the car.
+ARDUINO_FAN_SLEEP_SEC = 3.0
 ARDUINO_FAN_REPEAT_SEC = 10.0
 # Smoking (LOW risk, its own voice alert) is detected either by the camera
 # (the model's Smoking class, near the mouth) or by smoke in the cabin air:
@@ -550,6 +559,8 @@ _ENV_OVERRIDES = {
     "DG_DISPLAY_SCALE": ("DISPLAY_SCALE", float),
     "DG_DISPLAY_EVERY": ("DISPLAY_EVERY_N_FRAMES", int),
     "DG_CAMERA_FPS": ("CAMERA_FPS", int),
+    "DG_CAMERA": ("CAMERA_SOURCE", str),
+    "DG_CAMERA_INDEX": ("CAMERA_INDEX", int),
     "DG_YOLO": ("YOLO_ENABLED", bool),
     "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
     "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),

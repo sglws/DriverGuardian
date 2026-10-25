@@ -10,7 +10,7 @@ Wire protocol (115200 baud, ~5 lines a second from the Uno):
     SEN,mq3=<0-1023>,mq2=<0-1023>,warm=<0|1>,up=<seconds since power-on>
 The Pi asks "ID?" and the Uno answers "DGUNO,1" (it also says so after a
 reset). "1" sets the Uno's pin 6 (BTS7960 fan) for a 3 s burst - sent when
-the driver falls asleep or has a microsleep (ARDUINO_FAN_CASES). Other lines from the Uno
+the driver has been asleep (eyes closed) for 3 s (ARDUINO_FAN_SLEEP_SEC). Other lines from the Uno
 are ignored.
 
 Never blocks the main loop - the same pattern as the ESP32 link

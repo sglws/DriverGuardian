@@ -12,8 +12,12 @@ Two backends, auto-selected:
 - cv2.VideoCapture (V4L2) - USB webcams, and non-Pi dev machines where
   picamera2 isn't installed (it depends on system libcamera bindings that
   don't exist off-Pi, so it's never a pip dependency of this project).
+config.CAMERA_SOURCE ("auto" / "csi" / "usb", or DG_CAMERA=...) forces one -
+"usb" uses a USB webcam even on a Pi that has picamera2.
 """
 
+import glob
+import os
 import sys
 
 import cv2
@@ -31,10 +35,35 @@ except ImportError:
     Transform = None
 
 
+def _usb_camera_index():
+    """First USB webcam's /dev/videoN on Linux, or None. On a Pi 5 the low
+    numbers are the camera hardware (rp1-cfe, ISP), not the webcam; a webcam
+    has two nodes and the capture one is its interface index 0."""
+    for dev in sorted(glob.glob("/sys/class/video4linux/video*"), key=lambda p: int(p.rsplit("video", 1)[1])):
+        try:
+            usb = "/usb" in os.path.realpath(os.path.join(dev, "device"))
+            first = open(os.path.join(dev, "index")).read().strip() == "0"
+        except OSError:
+            continue
+        if usb and first:
+            return int(dev.rsplit("video", 1)[1])
+    return None
+
+
 class Camera:
     def __init__(self, index=config.CAMERA_INDEX,
                  width=config.FRAME_WIDTH, height=config.FRAME_HEIGHT):
-        self.using_picamera2 = _PICAMERA2_AVAILABLE
+        source = str(config.CAMERA_SOURCE).lower()
+        if source not in ("auto", "csi", "usb"):
+            raise RuntimeError(f"CAMERA_SOURCE must be auto, csi or usb, not {config.CAMERA_SOURCE!r}")
+        if source == "csi" and not _PICAMERA2_AVAILABLE:
+            raise RuntimeError("CAMERA_SOURCE = 'csi' needs picamera2 (Raspberry Pi OS: sudo apt install python3-picamera2)")
+        self.using_picamera2 = _PICAMERA2_AVAILABLE and source != "usb"
+        if source == "usb" and sys.platform.startswith("linux"):
+            found = _usb_camera_index()
+            if found is None:
+                raise RuntimeError("CAMERA_SOURCE = 'usb' but no USB webcam was found (check the cable: ls /dev/video*)")
+            index = found
 
         self._flip_in_software = True
         if self.using_picamera2:

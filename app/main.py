@@ -200,7 +200,7 @@ def main():
     web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
     uno = UnoLink()                          # cabin air sensors on USB (alcohol check, smoke)
-    fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno for sleep / microsleep
+    fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno after 3 s of sleep
     reported_test = None
     paused = False
     recalibrate_requested = False
@@ -570,14 +570,16 @@ def main():
                 # A test from the dashboard: no alerts, the car stays stopped.
                 risk, messages, debug = Risk.WAITING, [tests.title], {"case": "TEST", "score": None}
             alerts.dispatch(risk, messages, debug.get("case", "NONE"))
-            # Pin 6 on the Uno (fan) when the driver falls asleep or has a
-            # microsleep, and again every ARDUINO_FAN_REPEAT_SEC while it lasts.
-            fan_case = debug.get("case") in config.ARDUINO_FAN_CASES
+            # Pin 6 on the Uno (seat vibration) once the driver is asleep with
+            # the eyes closed for ARDUINO_FAN_SLEEP_SEC, and again every
+            # ARDUINO_FAN_REPEAT_SEC while it lasts.
+            fan_case = (config.ARDUINO_FAN_SLEEP_SEC is not None and debug.get("case") == "SLEEP"
+                        and drowsy_state["closed_elapsed"] >= config.ARDUINO_FAN_SLEEP_SEC)
             if fan_case and (not fan_prev or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC):
                 if uno.fan():
                     fan_last = now
                     recorder.log("system", "warning", "Fan burst",
-                                 f"Arduino pin 6 on for 3 s ({debug['case'].lower()})")
+                                 f"Arduino pin 6 on for 3 s (eyes closed {drowsy_state['closed_elapsed']:.1f} s)")
             fan_prev = fan_case
 
             if recorder.wants_update(now):
