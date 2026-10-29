@@ -384,7 +384,8 @@ SEATBELT_OFF_CONFIRM_SEC = 5.0   # belt continuously unseen this long -> confirm
 YOLO_CONFIRM_WINDOW = 3
 YOLO_CONFIRM_MIN = 2
 
-# Case 5 (eating/drinking/smoking) requires the object to be near the mouth.
+# Case 5: only DRINKING requires the object to be near the mouth (29 Oct);
+# eating and smoking count anywhere in the frame.
 # Radius, as a multiple of the mouth-corner distance, defining "near".
 # 3.5x worked out to roughly a quarter of the frame width in testing - far
 # wider than "near the mouth" should mean, and a second, independent source

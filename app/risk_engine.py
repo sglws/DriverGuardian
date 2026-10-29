@@ -215,8 +215,8 @@ class RiskEngine:
             messages.append("Alcohol in the cabin (MQ-3)")
             case_candidates.append((4, "ALCOHOL_DRIVE"))
 
-        # Smoking: LOW, from either source - the camera (Smoking class near
-        # the mouth) or smoke in the cabin air (MQ-2).
+        # Smoking: LOW, from either source - the camera (Smoking class, anywhere
+        # in the frame) or smoke in the cabin air (MQ-2).
         smoke_camera = bool(yolo_state.get("cigarette"))
         if smoke_camera or smoke_air:
             score += config.SCORE_LOW_MIN
