@@ -54,6 +54,10 @@ esp32/
 # Project documents (requirements, reports, plots) - kept out of git
 documents/
 
+# CSC423 report package (docs, PlantUML diagrams, generated report) - kept out of git
+docs/
+diagrams/
+
 # Piper voice models (~60-120 MB each) - download with tools/get_piper_voice.py
 models/piper/
 
