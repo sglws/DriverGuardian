@@ -250,14 +250,16 @@ class YoloDetector:
                         or "food" in name or "eating" in name):
                     # Drinking and Eating merged - see the merge note by
                     # COCO_CONSUMPTION_CLASSES in config.py.
+                    # Only drinking must be near the mouth (a bottle held
+                    # anywhere else is just being carried); eating counts
+                    # anywhere in the frame.
                     if passes("consumption", conf):
                         drinking = "drink" in name or "bottle" in name or "cup" in name
-                        counted = near_mouth((x1, y1, x2, y2),
-                                             config.DRINK_MOUTH_RADIUS_MULT if drinking else config.MOUTH_PROXIMITY_RADIUS_MULT)
+                        counted = near_mouth((x1, y1, x2, y2), config.DRINK_MOUTH_RADIUS_MULT) if drinking else True
                         result["consumption"] = result["consumption"] or counted
                 elif "cigarette" in name or "smoking" in name:
                     if passes("cigarette", conf):
-                        counted = near_mouth((x1, y1, x2, y2))
+                        counted = True          # anywhere in the frame, not only at the mouth
                         result["cigarette"] = bool(result["cigarette"]) or counted
                 elif "seatbelt" in name or "belt" in name:
                     if passes("seatbelt", conf):
@@ -286,7 +288,8 @@ class YoloDetector:
                     counted = True
                     result["phone"] = True
                 elif label in config.COCO_CONSUMPTION_CLASSES:
-                    counted = near_mouth((x1, y1, x2, y2))
+                    drinking = label in ("bottle", "cup", "wine glass")
+                    counted = near_mouth((x1, y1, x2, y2), config.DRINK_MOUTH_RADIUS_MULT) if drinking else True
                     result["consumption"] = result["consumption"] or counted
                 # cigarette / seatbelt stay None - not present in COCO
 
