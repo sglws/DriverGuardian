@@ -324,9 +324,9 @@ YOLO_CONF_THRESHOLD = 0.20
 # be stricter (weak/wrong "Drinking"/"Eating" guesses - false positives -
 # were the problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
 YOLO_CLASS_CONF_THRESHOLDS = {
-    "phone": 0.25,
-    "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.50,     # set to 0.50 (was 0.37, then 0.25)
+    "phone": 0.30,
+    "consumption": 0.50,  # Drinking+Eating merged - see the merge note below
+    "seatbelt": 0.35,     # set to 0.50 (was 0.37, then 0.25)
     "cigarette": 0.35,    # working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35

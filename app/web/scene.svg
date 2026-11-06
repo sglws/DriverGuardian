@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 1000" preserveAspectRatio="xMidYMid slice">
+  <!-- Dusk road through the windscreen, pre-blurred: the backdrop behind the glass panels.
+       Drawn by hand for DriverGuardian (no photo, no licence). The live risk tint is laid over it in style.css. -->
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#0f1626"/>
+      <stop offset=".36" stop-color="#222a47"/>
+      <stop offset=".54" stop-color="#4a3f5e"/>
+      <stop offset=".63" stop-color="#9a6a63"/>
+      <stop offset=".68" stop-color="#d79766"/>
+    </linearGradient>
+    <linearGradient id="ground" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a2532"/>
+      <stop offset=".25" stop-color="#16151d"/>
+      <stop offset="1" stop-color="#0a0b10"/>
+    </linearGradient>
+    <linearGradient id="road" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3b3340"/>
+      <stop offset="1" stop-color="#121219"/>
+    </linearGradient>
+    <radialGradient id="sun" cx=".5" cy=".5" r=".5">
+      <stop offset="0" stop-color="#ffc58f" stop-opacity=".9"/>
+      <stop offset=".45" stop-color="#f09a62" stop-opacity=".35"/>
+      <stop offset="1" stop-color="#f09a62" stop-opacity="0"/>
+    </radialGradient>
+    <filter id="soft" x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation="14"/></filter>
+    <filter id="bokeh" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="7"/></filter>
+  </defs>
+  <g filter="url(#soft)">
+    <rect width="1600" height="700" fill="url(#sky)"/>
+    <ellipse cx="900" cy="680" rx="520" ry="190" fill="url(#sun)"/>
+    <!-- far ridge, near ridge -->
+    <path d="M-40 690 L120 600 L260 640 L420 560 L560 630 L700 585 L860 650 L1010 570 L1180 640 L1330 590 L1480 645 L1640 600 L1640 700 L-40 700Z" fill="#4a3c55" opacity=".85"/>
+    <path d="M-40 705 L90 650 L230 690 L360 640 L520 700 L1080 700 L1230 650 L1380 690 L1520 640 L1640 680 L1640 720 L-40 720Z" fill="#2a2433"/>
+    <rect y="700" width="1600" height="300" fill="url(#ground)"/>
+    <!-- the road, running to the glow on the horizon -->
+    <path d="M880 700 L920 700 L1420 1000 L380 1000Z" fill="url(#road)"/>
+    <path d="M884 702 L430 1000" stroke="#d9c7a0" stroke-width="5" opacity=".35"/>
+    <path d="M916 702 L1370 1000" stroke="#d9c7a0" stroke-width="5" opacity=".35"/>
+    <path d="M900 712 L900 740 M900 770 L900 815 M900 855 L900 920 M900 960 L900 1000" stroke="#f2dfae" stroke-width="7" opacity=".45"/>
+  </g>
+  <!-- distant tail lights and street lamps -->
+  <g filter="url(#bokeh)">
+    <circle cx="893" cy="716" r="6" fill="#ff5a4e" opacity=".9"/>
+    <circle cx="907" cy="716" r="6" fill="#ff5a4e" opacity=".9"/>
+    <circle cx="640" cy="640" r="9" fill="#ffc77a" opacity=".55"/>
+    <circle cx="1180" cy="628" r="11" fill="#ffc77a" opacity=".5"/>
+    <circle cx="1330" cy="610" r="14" fill="#ffd9a0" opacity=".35"/>
+    <circle cx="470" cy="620" r="13" fill="#ffd9a0" opacity=".3"/>
+    <circle cx="300" cy="590" r="20" fill="#ffd9a0" opacity=".18"/>
+  </g>
+</svg>

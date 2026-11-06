@@ -65,3 +65,6 @@ models/piper/
 
 # Session history database (local test records)
 data/
+
+# Trained model downloads (best*.zip / .pt) - the installed copy lives in models/
+datasets/model_zips/
