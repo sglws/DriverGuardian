@@ -53,6 +53,16 @@ TARGET_FPS_PREFERRED = 30   # USB webcams (they usually only offer 15/30)
 # headroom above the requirement and leaves the rest of the CPU idle -
 # cooler Pi, smoother desktop. Raise it if the Pi has clear CPU headroom.
 CAMERA_FPS = 20
+# The Pi camera is a NoIR one (no infrared filter): with the normal colour
+# tuning, infrared light reaches the red pixels and the image turns pink/red.
+# True loads Raspberry Pi's NoIR tuning for the sensor instead (imx219 ->
+# imx219_noir.json), done by the ISP at no CPU cost. Override with DG_NOIR=0.
+CAMERA_NOIR = True
+# Grey image straight from the ISP (saturation 0, no CPU cost): under IR
+# light there is no real colour, so this removes any tint that is left.
+# YOLO was trained on colour images - compare detections before keeping it
+# on. Override with DG_GRAY=1.
+CAMERA_GRAYSCALE = False
 
 # When False: skips all drawing (face mesh dots, YOLO boxes, text panel)
 # and the cv2.imshow()/waitKey() window entirely - camera, MediaPipe,
@@ -326,7 +336,7 @@ YOLO_CONF_THRESHOLD = 0.20
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.25,
     "consumption": 0.55,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.50,     # set to 0.50 (was 0.37, then 0.25)
+    "seatbelt": 0.27,     # 0.27 for the 5 Nov model (was 0.50, 0.35, 0.37, 0.25)
     "cigarette": 0.35,    # working well at this level - don't disturb
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
@@ -562,6 +572,8 @@ _ENV_OVERRIDES = {
     "DG_CAMERA_FPS": ("CAMERA_FPS", int),
     "DG_CAMERA": ("CAMERA_SOURCE", str),
     "DG_CAMERA_INDEX": ("CAMERA_INDEX", int),
+    "DG_NOIR": ("CAMERA_NOIR", bool),
+    "DG_GRAY": ("CAMERA_GRAYSCALE", bool),
     "DG_YOLO": ("YOLO_ENABLED", bool),
     "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
     "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
