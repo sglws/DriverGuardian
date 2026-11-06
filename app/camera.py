@@ -69,11 +69,13 @@ class Camera:
         if self.using_picamera2:
             # NoIR sensor: its own tuning keeps infrared light from turning
             # the image pink/red. Falls back to the default tuning if this
-            # OS has no NoIR file for the sensor.
+            # OS has no NoIR file for the sensor. The sensor comes from config,
+            # not Picamera2.global_camera_info(): that starts libcamera, which
+            # reads its tuning file once, so the NoIR file below was ignored.
             tuning, tuning_name = None, "default"
             if config.CAMERA_NOIR:
                 try:
-                    tuning_name = Picamera2.global_camera_info()[0]["Model"] + "_noir.json"
+                    tuning_name = config.CAMERA_SENSOR + "_noir.json"
                     tuning = Picamera2.load_tuning_file(tuning_name)
                 except (IndexError, KeyError, RuntimeError, OSError) as e:
                     print(f"[camera] NoIR tuning not available ({e}) - using the default")

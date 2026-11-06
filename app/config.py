@@ -58,6 +58,7 @@ CAMERA_FPS = 20
 # True loads Raspberry Pi's NoIR tuning for the sensor instead (imx219 ->
 # imx219_noir.json), done by the ISP at no CPU cost. Override with DG_NOIR=0.
 CAMERA_NOIR = True
+CAMERA_SENSOR = "imx219"    # the Pi camera's sensor (rpicam-hello --list-cameras)
 # Grey image straight from the ISP (saturation 0, no CPU cost): under IR
 # light there is no real colour, so this removes any tint that is left.
 # YOLO was trained on colour images - compare detections before keeping it
