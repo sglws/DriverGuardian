@@ -67,7 +67,18 @@ class Camera:
 
         self._flip_in_software = True
         if self.using_picamera2:
-            self.picam2 = Picamera2()
+            # NoIR sensor: its own tuning keeps infrared light from turning
+            # the image pink/red. Falls back to the default tuning if this
+            # OS has no NoIR file for the sensor.
+            tuning, tuning_name = None, "default"
+            if config.CAMERA_NOIR:
+                try:
+                    tuning_name = Picamera2.global_camera_info()[0]["Model"] + "_noir.json"
+                    tuning = Picamera2.load_tuning_file(tuning_name)
+                except (IndexError, KeyError, RuntimeError, OSError) as e:
+                    print(f"[camera] NoIR tuning not available ({e}) - using the default")
+                    tuning_name = "default"
+            self.picam2 = Picamera2(tuning=tuning)
             # NOTE: picamera2's "RGB888" format is a legacy/misleading name -
             # capture_array() actually returns BGR-ordered bytes for it,
             # which is exactly what OpenCV/this codebase expects. Do NOT
@@ -101,13 +112,15 @@ class Camera:
             video_config = self.picam2.create_video_configuration(
                 main={"size": (width, height), "format": "RGB888"},
                 buffer_count=4,
-                controls={"FrameRate": config.CAMERA_FPS},
+                controls={"FrameRate": config.CAMERA_FPS,
+                          **({"Saturation": 0.0} if config.CAMERA_GRAYSCALE else {})},
                 **extra,
             )
             self.picam2.configure(video_config)
             self.picam2.start()
             print(f"[camera] Using picamera2 (libcamera) at {width}x{height}, "
-                  f"{config.CAMERA_FPS} fps, mirror in {'software' if self._flip_in_software else 'hardware'}")
+                  f"{config.CAMERA_FPS} fps, mirror in {'software' if self._flip_in_software else 'hardware'}, "
+                  f"tuning {tuning_name}{', grayscale' if config.CAMERA_GRAYSCALE else ''}")
         else:
             # No backend given, cv2.VideoCapture() defaults to whatever
             # OpenCV auto-picks - on Windows that's usually MSMF, which is
