@@ -108,6 +108,21 @@ SESSION_HISTORY_KEEP = 20
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SESSION_DB_PATH = os.path.join(DATA_DIR, "driverguardian.db")
 
+# Incidents - the black box (app/incidents.py). When the risk turns HIGH, the
+# ESP32 makes an emergency stop or loses the Pi, the camera frames and
+# readings from INCIDENT_PRE_SEC before to INCIDENT_POST_SEC after are saved
+# to INCIDENTS_DIR and shown on the dashboard's Incidents page. ~10 MB of RAM;
+# ~3-5 MB of disk per incident; the newest INCIDENTS_KEEP are kept.
+INCIDENTS_ENABLED = True
+INCIDENTS_DIR = os.path.join(DATA_DIR, "incidents")
+INCIDENTS_KEEP = 30
+INCIDENT_PRE_SEC = 20
+INCIDENT_POST_SEC = 10
+INCIDENT_MAX_SEC = 40           # retriggers keep it open, but never longer than this after the first
+INCIDENT_FPS = 5
+INCIDENT_WIDTH = 640
+INCIDENT_JPEG_QUALITY = 72
+
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
 APP_NICE = 10

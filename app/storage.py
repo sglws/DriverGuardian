@@ -48,16 +48,19 @@ CREATE TABLE IF NOT EXISTS samples (
     ts REAL NOT NULL, risk TEXT, "case" TEXT,
     ear REAL, ear_thr REAL, mar REAL, mar_thr REAL, pitch REAL, yaw REAL, fps REAL,
     flags INTEGER, perclos REAL, blinks INTEGER, yawns INTEGER,
-    mq3 INTEGER, mq2 INTEGER, mq3_rel REAL, mq2_rel REAL
+    mq3 INTEGER, mq2 INTEGER, mq3_rel REAL, mq2_rel REAL,
+    left_pwm INTEGER, right_pwm INTEGER
 );
 CREATE INDEX IF NOT EXISTS events_by_session ON events(session_id, ts);
 CREATE INDEX IF NOT EXISTS samples_by_session ON samples(session_id, ts);
 """
 SAMPLE_FIELDS = ("ts", "risk", "case", "ear", "ear_thr", "mar", "mar_thr", "pitch", "yaw", "fps",
-                 "flags", "perclos", "blinks", "yawns", "mq3", "mq2", "mq3_rel", "mq2_rel")
+                 "flags", "perclos", "blinks", "yawns", "mq3", "mq2", "mq3_rel", "mq2_rel",
+                 "left_pwm", "right_pwm")
 # columns added after the first release - added to an older database on start
 _ADDED_COLUMNS = {"flags": "INTEGER", "perclos": "REAL", "blinks": "INTEGER", "yawns": "INTEGER",
-                  "mq3": "INTEGER", "mq2": "INTEGER", "mq3_rel": "REAL", "mq2_rel": "REAL"}
+                  "mq3": "INTEGER", "mq2": "INTEGER", "mq3_rel": "REAL", "mq2_rel": "REAL",
+                  "left_pwm": "INTEGER", "right_pwm": "INTEGER"}
 
 # Bits of samples.flags: which detectors were active at that moment.
 FLAG_BITS = {

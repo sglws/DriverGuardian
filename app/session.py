@@ -24,8 +24,9 @@ MAX_EPISODES = 1000
 
 
 class SessionRecorder:
-    def __init__(self, store=None):
+    def __init__(self, store=None, blackbox=None):
         self.store = store
+        self.blackbox = blackbox        # incidents.py: the seconds around a dangerous moment
         self._lock = threading.Lock()
         self.session_id = None
         self.label = ""
@@ -101,6 +102,12 @@ class SessionRecorder:
                 "time_in": dict(self._time_in), "alerts": dict(self._alerts),
                 "recording": self.session_id is not None,
             }
+            if self.blackbox is not None:
+                bb_sample = {**self._sample(state, now), "t": now, "seatbelt": (state.get("objects") or {}).get("seatbelt"),
+                             **{k: ((state.get("links") or {}).get("vehicle") or {}).get(k) for k in ("front_cm", "rear_cm", "estop", "base_pwm")}}
+                for title in self.blackbox.update(state, bb_sample, now, self.session_id, self.label):
+                    self._append_event("detect", "critical", "Incident recorded", title)
+                state["incident"] = self.blackbox.status()
             self._state, self._state_at = state, now
 
             if now - self._last_sample >= config.WEB_HISTORY_INTERVAL_SEC:
@@ -187,6 +194,12 @@ class SessionRecorder:
         c = state.get("cabin") or {}
         return {"mq3": c.get("mq3"), "mq2": c.get("mq2"), "mq3_rel": c.get("mq3_rel"), "mq2_rel": c.get("mq2_rel")}
 
+    @staticmethod
+    def _motors(state):
+        """Left/right motor PWM from the ESP32's telemetry (0 = stopped, up to 255)."""
+        v = (state.get("links") or {}).get("vehicle") or {}
+        return {"left_pwm": v.get("left_pwm"), "right_pwm": v.get("right_pwm")}
+
     @classmethod
     def _sample(cls, state, now):
         eyes, mouth, head = state.get("eyes") or {}, state.get("mouth") or {}, state.get("head") or {}
@@ -204,6 +217,7 @@ class SessionRecorder:
             "fps": (state.get("perf") or {}).get("fps"),
             "flags": None if state.get("calibrating") else cls._flags(state),
             **cls._cabin(state),
+            **cls._motors(state),
             "perclos": state.get("perclos"),
             **counters,
         }

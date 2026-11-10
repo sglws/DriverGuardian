@@ -27,6 +27,11 @@ Endpoints
     POST /api/marker {text}         add a marker to the current session
     POST /api/sessions/ID {label, notes}   rename / annotate a session
     DELETE /api/sessions/ID         delete a saved session
+    /api/incidents                  saved incidents (app/incidents.py)
+    /api/incidents/ID               one incident: what happened, readings, frame times
+    /api/incidents/ID/N.jpg         its camera frame N
+    /api/incidents/ID.zip           everything, as one download
+    DELETE /api/incidents/ID        delete an incident
 
 Threads here only move bytes, read the database and encode JPEGs; none of
 them ever fork() a process - the hazard behind this project's earlier
@@ -55,7 +60,7 @@ _CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charse
                   ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
                   ".woff2": "font/woff2"}   # manrope.woff2: bundled UI font (SIL OFL, manrope-OFL.txt)
 _ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute",
-            "test_start", "test_stop"}
+            "test_start", "test_stop", "save_incident"}
 _PIN_MAX_FAILS, _PIN_LOCK_SEC = 5, 60.0
 
 
@@ -72,8 +77,8 @@ def _lan_address():
 
 
 class WebView:
-    def __init__(self, recorder, store=None):
-        self.recorder, self.store = recorder, store
+    def __init__(self, recorder, store=None, blackbox=None):
+        self.recorder, self.store, self.blackbox = recorder, store, blackbox
         self.enabled = config.WEB_VIEW_ENABLED
         self._cond = threading.Condition()     # frame/jpeg hand-off and viewer count
         self._frame = None
@@ -159,7 +164,8 @@ class WebView:
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
-                self.send_header("Cache-Control", "no-store")
+                if "Cache-Control" not in (extra_headers or {}):
+                    self.send_header("Cache-Control", "no-store")
                 for k, v in (extra_headers or {}).items():
                     self.send_header(k, v)
                 self.end_headers()
@@ -245,6 +251,9 @@ class WebView:
                     m = re.fullmatch(r"/api/sessions(?:/(\d+)(?:/(samples|events)\.csv)?)?", path)
                     if m:
                         return self._sessions_get(m.group(1), m.group(2))
+                    m = re.fullmatch(r"/api/incidents(?:/([\d-]+)(?:/(\d+)\.jpg|(\.zip))?)?", path)
+                    if m:
+                        return self._incidents_get(*m.groups())
                     self._error(404, "not found")
                 except ValueError:
                     self._error(400, "bad request")
@@ -284,6 +293,27 @@ class WebView:
                 safe = re.sub(r"[^\w.-]+", "_", s["label"] or f"session_{sid}")
                 self._send(200, "text/csv; charset=utf-8", buf.getvalue().encode(),
                            {"Content-Disposition": f'attachment; filename="{safe}_{csv_kind}.csv"'})
+
+            def _incidents_get(self, iid, frame, as_zip):
+                bb = view.blackbox
+                if bb is None or not bb.enabled:
+                    return self._error(503, "incident recording is disabled")
+                if iid is None:
+                    return self._json({"incidents": bb.list(), "keep": config.INCIDENTS_KEEP, **bb.status()})
+                if frame is not None:
+                    jpg = bb.frame(iid, frame)
+                    if jpg is None:
+                        return self._error(404, "frame not found")
+                    # frames never change once written: let the browser keep them for scrubbing
+                    return self._send(200, "image/jpeg", jpg, {"Cache-Control": "private, max-age=86400"})
+                if as_zip:
+                    data = bb.zip(iid)
+                    if data is None:
+                        return self._error(404, "incident not found")
+                    return self._send(200, "application/zip", data,
+                                      {"Content-Disposition": f'attachment; filename="DriverGuardian_incident_{iid}.zip"'})
+                inc = bb.get(iid)
+                return self._json(inc) if inc else self._error(404, "incident not found")
 
             # ---------------------------------------------------- POST / DELETE
             def do_POST(self):
@@ -333,6 +363,9 @@ class WebView:
             def do_DELETE(self):
                 if not self._authorized():
                     return
+                m = re.fullmatch(r"/api/incidents/([\d-]+)", urlparse(self.path).path)
+                if m and view.blackbox is not None:
+                    return self._json({"ok": view.blackbox.delete(m.group(1))})
                 m = re.fullmatch(r"/api/sessions/(\d+)", urlparse(self.path).path)
                 if not m or view.store is None:
                     return self._error(404, "not found")

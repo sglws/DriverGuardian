@@ -91,6 +91,7 @@ from app.alerts import AlertSystem
 from app.web_view import WebView
 from app.storage import SessionStore
 from app.session import SessionRecorder
+from app.incidents import BlackBox
 from app.testing import TestController
 from app.arduino import UnoLink
 
@@ -195,9 +196,10 @@ def main():
             store = SessionStore(config.SESSION_DB_PATH, keep=config.SESSION_HISTORY_KEEP)
         except Exception as e:
             print(f"[storage] session history unavailable: {e}")
-    recorder = SessionRecorder(store)
+    blackbox = BlackBox()                    # incidents: the seconds around a dangerous moment
+    recorder = SessionRecorder(store, blackbox)
     recorder.start()
-    web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
+    web = WebView(recorder, store, blackbox)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
     uno = UnoLink()                          # cabin air sensors on USB (alcohol check, smoke)
     fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno after 3 s of sleep
@@ -323,6 +325,8 @@ def main():
                             recalibrate_requested = True
                 elif action == "test_stop":
                     tests.stop(time.monotonic())
+                elif action == "save_incident":
+                    blackbox.save_now("Saved from the dashboard")
                 elif action == "new_session":
                     tests.stop(time.monotonic(), "new session started")
                     sync_tests()
@@ -416,6 +420,7 @@ def main():
                 # window also draws its text onto this frame.)
                 if show and face_found:
                     face_mesh.draw(frame, drawable)
+                blackbox.add_frame(frame, now)
                 if stream_due:
                     web.publish(frame.copy() if display_due else frame, now)
                 if face_found:
@@ -545,7 +550,9 @@ def main():
                     cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
             # Dashboard frame: face dots + detection boxes, no status text (see
-            # the calibration branch above for why).
+            # the calibration branch above for why). The black box keeps a
+            # downscaled copy 5x a second (app/incidents.py).
+            blackbox.add_frame(frame, now)
             if stream_due:
                 web.publish(frame.copy() if display_due else frame, now)
 
@@ -862,6 +869,7 @@ def main():
                 recalibrate_requested = True   # applied at the top of the next loop
 
     finally:
+        blackbox.close()
         recorder.end("app stopped")
         if store is not None:
             store.flush()

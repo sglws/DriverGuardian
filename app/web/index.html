@@ -33,6 +33,8 @@
       <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M7.8 16.2a6 6 0 0 1 0-8.4M16.2 7.8a6 6 0 0 1 0 8.4M4.9 19.1a10 10 0 0 1 0-14.2M19.1 4.9a10 10 0 0 1 0 14.2"/></svg><span>Live</span></button>
     <button role="tab" id="tab-history" aria-selected="false" aria-controls="view-history">
       <svg class="i" viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.5-6L3.5 8.5"/><path d="M3.5 3.5v5h5M12 7.5V12l3 2"/></svg><span>History</span></button>
+    <button role="tab" id="tab-incidents" aria-selected="false" aria-controls="view-incidents">
+      <svg class="i" viewBox="0 0 24 24"><path d="M12 3.5 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.01"/></svg><span>Incidents</span><b class="tab-badge" id="inc-badge" hidden></b></button>
   </nav>
   <div class="rail-tools icon-group">
       <button class="icon-btn" id="btn-kiosk" data-tip="Presentation mode (K)" aria-label="Presentation mode">
@@ -147,6 +149,11 @@
         <div><dt>Since</dt><dd id="hero-since">—</dd></div>
         <div><dt>Score</dt><dd id="hero-score">—</dd></div>
       </dl>
+      <div class="motors" id="hero-motors" aria-label="Motor speed">
+        <div class="mo"><div class="mo-dial" id="mo-left"></div><span class="mo-name">Left motors</span></div>
+        <div class="mo"><div class="mo-dial" id="mo-right"></div><span class="mo-name">Right motors</span></div>
+        <p class="mo-note" id="mo-note"></p>
+      </div>
     </section>
 
     <ul class="telltales dim-when-stale" id="telltales" aria-label="Warning lamps"></ul>
@@ -189,6 +196,7 @@
       <div class="card" id="c-blinks"></div>
       <div class="card" id="c-fatigue"></div>
       <div class="card wide" id="c-air"></div>
+      <div class="card wide" id="c-motors"></div>
     </div>
   </section>
 
@@ -218,6 +226,25 @@
     <div class="hist-detail" id="hist-detail">
       <div class="card empty-detail"><div class="empty">Select a session to see its timeline, events and summary.</div></div>
     </div>
+  </div>
+</section>
+
+<section id="view-incidents" role="tabpanel" aria-labelledby="tab-incidents" hidden>
+  <div class="inc-top">
+    <div>
+      <h1 class="page-title">Incidents</h1>
+      <p class="inc-intro">The black box. When the risk turns High, the car makes an emergency stop or the ESP32 loses the Pi,
+        the camera and every reading from 20 s before to 10 s after are kept here — even after the session is deleted.</p>
+    </div>
+    <button class="danger" id="btn-save-inc" title="Keep the last 20 s and the next 10 s as an incident">
+      <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/></svg><span>Save the last 30 s</span></button>
+  </div>
+  <div class="history">
+    <aside class="card hist-list-card">
+      <div class="card-h"><h2>Recorded incidents</h2><span class="sub" id="inc-keep"></span></div>
+      <div class="hist-list" id="inc-list" role="listbox" aria-label="Recorded incidents"></div>
+    </aside>
+    <div class="hist-detail" id="inc-detail"></div>
   </div>
 </section>
 

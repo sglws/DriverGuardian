@@ -223,12 +223,14 @@ function dialog({ title, body = "", confirm = "OK", danger = false, input = null
 }
 
 /* ================================================================ tabs */
-/* Views: #live, #history, #report/ID, #compare/A/B and #kiosk (presentation). */
+/* Views: #live, #history, #incidents[/ID], #report/ID, #compare/A/B and #kiosk (presentation). */
 let view = "live";
 function setView(v, args = []) {
   view = v;
   $("tab-live").setAttribute("aria-selected", String(v === "live"));
-  $("tab-history").setAttribute("aria-selected", String(v !== "live"));
+  $("tab-history").setAttribute("aria-selected", String(["history", "report", "compare"].includes(v)));
+  $("tab-incidents").setAttribute("aria-selected", String(v === "incidents"));
+  $("view-incidents").hidden = v !== "incidents";
   $("view-live").hidden = v !== "live";
   $("view-history").hidden = v !== "history";
   $("view-report").hidden = v !== "report";
@@ -237,9 +239,10 @@ function setView(v, args = []) {
   if (v !== "report") document.title = "DriverGuardian Monitor";
   if (v === "live") { startVideo(); liveCharts.forEach((c) => c.render()); } else stopVideo();
   if (v === "history") loadHistory();
+  if (v === "incidents") loadIncidents(args[0]); else incPlayer && incPlayer.pause();
   if (v === "report") renderReport(args[0]);
   if (v === "compare") renderCompare(args[0], args[1]);
-  const hash = ["report", "compare"].includes(v) ? `#${[v, ...args].join("/")}` : kioskOn ? "#kiosk" : `#${v}`;
+  const hash = ["report", "compare"].includes(v) || (v === "incidents" && args[0]) ? `#${[v, ...args].join("/")}` : kioskOn ? "#kiosk" : `#${v}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
 }
 function route() {
@@ -248,6 +251,7 @@ function route() {
   if (kioskOn) setKiosk(false);
   if (v === "report" && Number(a)) setView("report", [Number(a)]);
   else if (v === "compare" && Number(a) && Number(b)) setView("compare", [Number(a), Number(b)]);
+  else if (v === "incidents") setView("incidents", a ? [a] : []);
   else setView(v === "history" ? "history" : "live");
 }
 window.addEventListener("hashchange", route);
@@ -259,6 +263,7 @@ function goView(v) {
 }
 $("tab-live").onclick = () => { if (kioskOn) setKiosk(false); goView("live"); };
 $("tab-history").onclick = () => goView("history");
+$("tab-incidents").onclick = () => goView("incidents");
 
 /* ================================================================ video */
 const video = $("video");
@@ -317,7 +322,7 @@ function renderKiosk() {
   const fact = (label, value) => { const d = el("div"); d.append(el("span", null, label), el("b", null, value)); f.append(d); };
   fact("For", duration((Date.now() - riskSince.at) / 1000));
   const veh = state.links && state.links.vehicle;
-  if (veh) fact("Vehicle speed", veh.estop ? "Stopped" : `${veh.speed_pct ?? "—"} %`);
+  if (veh) fact("Motors, left / right", veh.estop ? "Stopped" : `${veh.left_pwm} / ${veh.right_pwm} PWM`);
   const sess = state.session || {};
   const alerts = Object.values(sess.alerts || {}).reduce((a, b) => a + b, 0);
   fact("Alerts this session", String(alerts));
@@ -386,6 +391,8 @@ function renderLive() {
   renderHero();
   renderChips();
   renderVehicle();
+  renderHeroMotors();
+  renderIncBadge();
   renderTest();
   renderDiagSummary();
   if ($("diag").open) renderPanels();
@@ -684,6 +691,16 @@ function renderTelltales() {
   });
 }
 
+/* A motor's PWM in the signal chain; without telemetry, the ESP32 link state. */
+function motorNode(name, key, links) {
+  const v = links.vehicle;
+  if (!v) return { name, value: "No data", tone: ["disabled", "unsupported"].includes(links.esp32) ? "info" : "warn",
+                   note: links.esp32 === "connected" ? "no telemetry" : `ESP32 ${links.esp32 || "off"}` };
+  const pwm = v[key];
+  return { name, value: `${pwm} PWM`, tone: v.estop ? "crit" : "good",
+           note: v.estop ? "emergency stop" : pwm ? `${Math.round((pwm / 255) * 100)} % power` : "stopped" };
+}
+
 /* The signal chain: every stage from the camera to the car, with its health. */
 function renderChain() {
   const s = state, perf = s.perf || {}, links = s.links || {}, stages = perf.stages_ms || {}, req = s.requirements || {};
@@ -701,9 +718,7 @@ function renderChain() {
       tone: perf.rate_hz == null ? "info" : perf.rate_hz >= (req.min_avg_rate_hz || 0) ? "good" : "crit", note: req.min_avg_rate_hz ? `needs ${req.min_avg_rate_hz} Hz` : "" },
     { name: "Voice", value: links.muted ? "Muted" : cap(links.voice || "—"), tone: links.muted ? "warn" : links.voice === "on" ? "good" : "info",
       note: links.voice_last_age != null ? `spoke ${duration(links.voice_last_age)} ago` : "nothing said yet" },
-    { name: "Vehicle", value: links.vehicle ? (links.vehicle.estop ? "Stopped" : `${links.vehicle.speed_pct ?? "—"} %`) : cap(links.esp32 || "—"),
-      tone: links.esp32 === "connected" ? (links.vehicle && links.vehicle.estop ? "crit" : "good") : ["disabled", "unsupported"].includes(links.esp32) ? "info" : "warn",
-      note: links.vehicle ? "speed, ESP32" : "ESP32, Bluetooth" },
+    motorNode("Left motors", "left_pwm", links), motorNode("Right motors", "right_pwm", links),
   ];
   const list = $("chain");
   if (list.children.length !== nodes.length)
@@ -717,7 +732,6 @@ function renderChain() {
 }
 
 /* ---------- vehicle (ESP32 telemetry) */
-const PULLOVER_SEC = 12;
 function renderVehicle() {
   const links = state.links || {}, v = links.vehicle, box = $("p-vehicle");
   $("veh-sub").textContent = v ? "live from the ESP32" : "";
@@ -731,9 +745,8 @@ function renderVehicle() {
   const frag = document.createDocumentFragment();
   if (v.estop) frag.append(vehBanner("crit", "stop", v.estop === "obstacle" ? "Emergency stop — obstacle within 10 cm" : "Emergency stop — edge of the surface detected"));
   else if (v.risk === "HIGH" && v.pullover_s > 0) {
-    const left = Math.max(0, PULLOVER_SEC - v.pullover_s), b = vehBanner("crit", "car", v.pullover_s >= PULLOVER_SEC ? "Pull-over finished — stopped" : `Pulling over to the right · stops in ${fmt(left, 1)} s`);
-    const bar = el("div", "bar"), fill = el("i"); fill.style.width = `${Math.min(100, (v.pullover_s / PULLOVER_SEC) * 100)}%`; bar.append(fill); b.append(bar);
-    frag.append(b);
+    const done = !v.left_pwm && !v.right_pwm;
+    frag.append(vehBanner("crit", "car", done ? "Pull-over finished — stopped" : `Pulling over to the right — ${fmt(v.pullover_s, 0)} s so far`));
   }
   if (v.link_failed) frag.append(vehBanner("warn", "bt", "The ESP32 lost the Pi's heartbeat — its fail-safe is active"));
   const grid = el("div", "veh-grid");
@@ -741,9 +754,13 @@ function renderVehicle() {
     const t = el("div", `vt ${tone || ""}`), kk = el("div", "k"); kk.append(icon(ic), document.createTextNode(k));
     t.append(kk, el("div", "v", val)); if (sub) t.append(el("div", "s", sub)); grid.append(t); return t;
   };
-  const sp = tile("gauge", "Speed", v.estop ? "Stopped" : v.speed_pct == null ? "—" : `${v.speed_pct} %`,
-    `left ${v.left_pwm}, right ${v.right_pwm} of ${v.base_pwm} PWM`);
-  const meter = el("div", "meter"), mf = el("i"); mf.style.width = `${Math.min(100, v.speed_pct || 0)}%`; meter.append(mf); sp.append(meter);
+  const motor = (k, pwm) => {
+    const t = tile("gauge", k, `${pwm} PWM`, pwm ? `${Math.round((pwm / 255) * 100)} % of full power (255)` : "stopped");
+    const m = el("div", "meter motor"), f = el("i"); f.style.width = `${Math.min(100, (pwm / 255) * 100)}%`;
+    const th = el("b"); th.style.left = `${(MOTOR_MIN / 255) * 100}%`; th.title = `${MOTOR_MIN} = slowest normal driving speed`; m.append(f, th); t.append(m);
+  };
+  motor("Left motors", v.left_pwm);
+  motor("Right motors", v.right_pwm);
   const dist = (k, d) => {
     const near = d != null && d <= 10, t = tile("ruler", k, d == null ? "Clear" : `${fmt(d, 0)} cm`, d == null ? "nothing within 1 m" : near ? "within the 10 cm stop distance" : "", near ? "crit" : "");
     const m = el("div", "meter dist"), f = el("i"); f.style.width = `${d == null ? 100 : Math.min(100, d)}%`;
@@ -755,6 +772,57 @@ function renderVehicle() {
   tile("edge", "Edge sensors", edge ? "Edge!" : "On surface", `front ${v.ir_front ? "at the edge" : "fine"}, rear ${v.ir_rear ? "at the edge" : "fine"}`, edge ? "crit" : "");
   frag.append(grid);
   box.replaceChildren(frag);
+}
+/* A small motor dial in the risk gauge's style: needle and filled arc for 0-255 PWM. */
+function buildMotorDial(host) {
+  const svg = svgEl("svg", { viewBox: "8 14 224 168", class: "gauge-svg mo-svg", role: "img" });
+  const ang = (pwm) => GAUGE.start + (GAUGE.sweep * Math.max(0, Math.min(255, pwm))) / 255;
+  for (let p = 0; p <= 250; p += 25) {
+    const major = p % 100 === 0, [x0, y0] = gaugePoint(ang(p), 80), [x1, y1] = gaugePoint(ang(p), major ? 70 : 75);
+    svg.append(svgEl("line", { x1: x0, y1: y0, x2: x1, y2: y1, class: major ? "g-tick major" : "g-tick" }));
+  }
+  [[0, "0"], [MOTOR_MIN, String(MOTOR_MIN)], [255, "255"]].forEach(([p, s]) => {
+    const [lx, ly] = gaugePoint(ang(p), 58), t = svgEl("text", { x: lx, y: ly + 5, class: "mo-tick", "text-anchor": "middle" });
+    t.textContent = s; svg.append(t);
+  });
+  svg.append(svgEl("path", { d: arcPath(GAUGE.start, GAUGE.start + GAUGE.sweep, GAUGE.r), class: "mo-track" }));
+  const fill = svgEl("path", { d: arcPath(GAUGE.start, GAUGE.start + GAUGE.sweep, GAUGE.r), class: "mo-fill", pathLength: 1 });
+  const needle = svgEl("g", { class: "g-needle" });
+  needle.append(svgEl("path", { d: `M${GAUGE.cx - 3.6},${GAUGE.cy} L${GAUGE.cx},${GAUGE.cy - GAUGE.r + 12} L${GAUGE.cx + 3.6},${GAUGE.cy} Z`, class: "g-needle-body" }),
+    svgEl("circle", { cx: GAUGE.cx, cy: GAUGE.cy, r: 9, class: "g-hub" }));
+  const val = svgEl("text", { x: GAUGE.cx, y: GAUGE.cy + 52, class: "mo-val", "text-anchor": "middle" });
+  svg.append(fill, needle, val);
+  host.replaceChildren(svg);
+  let last;
+  return {
+    set(pwm) {
+      if (pwm === last) return;
+      last = pwm;
+      host.classList.toggle("idle", pwm == null);
+      fill.style.strokeDasharray = `${pwm == null ? 0 : Math.min(1, pwm / 255)} 1`;
+      needle.style.transform = `rotate(${ang(pwm || 0)}deg)`;
+      val.textContent = pwm == null ? "—" : String(pwm);
+      svg.setAttribute("aria-label", pwm == null ? "no data" : `${pwm} PWM of 255`);
+    },
+  };
+}
+let moDials = null;
+/* Motors in the risk card: the risk level sets the car's speed, so show it right there. */
+function renderHeroMotors() {
+  const links = state.links || {}, v = links.vehicle;
+  moDials = moDials || [buildMotorDial($("mo-left")), buildMotorDial($("mo-right"))];
+  moDials[0].set(v ? v.left_pwm : null);
+  moDials[1].set(v ? v.right_pwm : null);
+  $("hero-motors").classList.toggle("off", !v);
+  let note;
+  if (!v) note = links.esp32 === "connected" ? "No motor data — the ESP32 firmware sends no telemetry" : `No motor data — ESP32 ${links.esp32 || "off"}`;
+  else if (v.estop) note = v.estop === "obstacle" ? "Emergency stop — obstacle within 10 cm" : "Emergency stop — edge of the surface";
+  else if (v.risk === "HIGH") note = !v.left_pwm && !v.right_pwm ? "Pulled over and stopped" : `Pulling over to the right — ${fmt(v.pullover_s, 0)} s`;
+  else if (!v.left_pwm && !v.right_pwm) note = "Stopped";
+  else if (v.left_pwm !== v.right_pwm) note = "Evening out after a turn";
+  else note = { SAFE: `Cruising at the base speed, ${v.base_pwm} PWM`, LOW: "Slowed to 70 % of base for Low risk",
+                MEDIUM: "Slowed to 50 % of base for Medium risk" }[v.risk] || "";
+  $("mo-note").textContent = note;
 }
 function vehBanner(tone, ic, text) {
   const b = el("div", `veh-banner ${tone}`); const t = el("div", "t"); t.append(icon(ic), document.createTextNode(text)); b.append(t); return b;
@@ -985,6 +1053,11 @@ function niceTicks(min, max, count = 4) {
 }
 function xTicks(src, width = 600) {
   const { t0, t1, clockAxis } = src, span = t1 - t0, out = [];
+  if (src.relAxis) {                       // seconds from an incident's trigger
+    const st = width < 520 ? 10 : 5;
+    for (let t = Math.ceil(t0 / st) * st; t <= t1; t += st) out.push({ t, label: t === 0 ? "0" : `${t > 0 ? "+" : "−"}${Math.abs(t)} s` });
+    return out;
+  }
   if (!clockAxis) {
     const step = span <= 60 ? 15 : span <= 300 ? 60 : 120;
     for (let back = 0; back <= span + 0.01; back += step) out.push({ t: t1 - back, label: back === 0 ? "now" : step < 60 ? `−${back}s` : `−${back / 60}m` });
@@ -1113,13 +1186,16 @@ function lineChart(card, cfg, source, opts = {}) {
     const W = shell.plot.clientWidth || 300;
     const vals = [];
     rows.forEach((r) => { cfg.series.forEach((s) => { if (r[s.key] != null) vals.push(r[s.key]); }); if (cfg.ref && r[cfg.ref.key] != null) vals.push(r[cfg.ref.key]); });
+    const has = vals.length;
     if (cfg.includeZero) vals.push(0);
-    if (!rows.length || vals.length <= (cfg.includeZero ? 1 : 0)) { shell.plot.replaceChildren(el("div", "empty", cfg.emptyText || "No data yet — waiting for the driver's face")); return; }
+    if (cfg.domain) vals.push(...cfg.domain);   // a fixed scale, so the size of a change is honest
+    if (!rows.length || !has) { shell.plot.replaceChildren(el("div", "empty", cfg.emptyText || "No data yet — waiting for the driver's face")); return; }
     let min = Math.min(...vals), max = Math.max(...vals);
     if (cfg.minSpan && max - min < cfg.minSpan) { const c = (max + min) / 2; min = c - cfg.minSpan / 2; max = c + cfg.minSpan / 2; }
     if (cfg.floor != null && min < cfg.floor) { max += cfg.floor - min; min = cfg.floor; }
     const yt = niceTicks(min, max, 4);
     if (cfg.floor != null && yt.lo < cfg.floor) { yt.ticks = yt.ticks.filter((v) => v >= cfg.floor); yt.lo = cfg.floor; }
+    if (cfg.domain) { yt.ticks = yt.ticks.filter((v) => v <= cfg.domain[1]); yt.hi = cfg.domain[1]; }   // e.g. stop at 255 PWM
     const pw = W - pad.l - pad.r, ph = H - pad.t - pad.b;
     const x = (t) => pad.l + ((t - t0) / (t1 - t0 || 1)) * pw;
     const y = (v) => pad.t + (1 - (v - yt.lo) / (yt.hi - yt.lo)) * ph;
@@ -1378,6 +1454,18 @@ const withAir = (source) => () => {
   return { ...src, rows: src.rows.map((r) => (r.mq3_rel != null || r.mq2_rel != null ? { ...r, air_ref: 1 } : r)) };
 };
 
+/* ================================================================ motors */
+const MOTOR_MIN = 100;   // MIN_MOTOR_SPEED in the ESP32 sketch; only the pull-over goes lower
+const MOTOR_CFG = { title: "Motor speed", sub: "PWM from the ESP32, 0 = stopped, 255 = full. The lines overlap when driving straight",
+  unit: "PWM", digits: 0, domain: [0, 255], floor: 0,
+  emptyText: "No motor data: the ESP32 isn't connected, or its firmware sends no telemetry",
+  series: [{ key: "left_pwm", label: "Left motors", short: "Left", token: "--series-1" }, { key: "right_pwm", label: "Right motors", short: "Right", token: "--series-2" }],
+  ref: { key: "motor_min", label: "slowest normal speed", unit: " PWM" } };
+const withMotors = (source) => () => {
+  const src = source();
+  return { ...src, rows: src.rows.map((r) => (r.left_pwm != null || r.right_pwm != null ? { ...r, motor_min: MOTOR_MIN } : r)) };
+};
+
 /* ================================================================ detector lanes */
 const LANES = [
   { bit: 1, label: "Eyes closed", group: "drowsy" }, { bit: 2, label: "Yawning", group: "drowsy" },
@@ -1561,6 +1649,7 @@ const liveCharts = [
   lineChart($("c-blinks"), BLINK_CFG, liveFatigue, { group: liveGroup }),
   fatigueCard($("c-fatigue"), liveFatigue),
   lineChart($("c-air"), AIR_CFG, withAir(liveSource), { group: liveGroup }),
+  lineChart($("c-motors"), MOTOR_CFG, withMotors(liveSource), { group: liveGroup }),
 ];
 document.querySelectorAll("#range button").forEach((b) => {
   b.setAttribute("aria-pressed", String(Number(b.dataset.sec) === rangeSec));
@@ -1813,7 +1902,8 @@ async function openSession(id) {
   const grid = el("div", "detail-charts");
   const cRisk = el("div", "card wide"), cLanes = el("div", "card wide"), cEar = el("div", "card"), cMar = el("div", "card"), cHead = el("div", "card");
   const cPerclos = el("div", "card"), cBlinks = el("div", "card"), cFatigue = el("div", "card"), cReact = el("div", "card wide"), cAir = el("div", "card wide");
-  grid.append(cRisk, cLanes, cReact, cEar, cMar, cHead, cPerclos, cBlinks, cFatigue, cAir);
+  const cMotors = el("div", "card wide");
+  grid.append(cRisk, cLanes, cReact, cEar, cMar, cHead, cPerclos, cBlinks, cFatigue, cAir, cMotors);
   detail.append(grid);
   const group = syncGroup(), fsrc = withFatigue(src);
   const list = el("div", "events"), filters = el("div", "filters");
@@ -1822,7 +1912,7 @@ async function openSession(id) {
     lanesChart(cLanes, src, { group }), reactionChart(cReact, () => sum.episodes),
     lineChart(cEar, EAR_CFG, src, { group }), lineChart(cMar, MAR_CFG, src, { group }), lineChart(cHead, HEAD_CFG, src, { group }),
     lineChart(cPerclos, PERCLOS_CFG, fsrc, { group }), lineChart(cBlinks, BLINK_CFG, fsrc, { group }), fatigueCard(cFatigue, fsrc),
-    lineChart(cAir, AIR_CFG, withAir(src), { group })];
+    lineChart(cAir, AIR_CFG, withAir(src), { group }), lineChart(cMotors, MOTOR_CFG, withMotors(src), { group })];
   charts.forEach((c) => c.render());
   historyCharts = charts;
 
@@ -1936,6 +2026,8 @@ async function renderReport(id) {
   page.append(docSection("Fatigue", fgrid));
   const hasAir = s.samples.some((r) => r.mq3 != null || r.mq2 != null), cAir = el("div", "card");
   if (hasAir) page.append(docSection("Cabin air", cAir));
+  const hasMotors = s.samples.some((r) => r.left_pwm != null || r.right_pwm != null), cMotors = el("div", "card");
+  if (hasMotors) page.append(docSection("Motor speed", cMotors));
   const cReact = el("div", "card");
   page.append(docSection("Reaction to alerts", cReact));
   // alerts by type
@@ -1963,7 +2055,8 @@ async function renderReport(id) {
   reportCharts = [riskChart(cRisk, src, { group }), lanesChart(cLanes, src, { group }),
     lineChart(cEar, EAR_CFG, src, { group }), lineChart(cMar, MAR_CFG, src, { group }), lineChart(cHead, HEAD_CFG, src, { group }),
     lineChart(cPerclos, PERCLOS_CFG, fsrc, { group }), lineChart(cBlinks, BLINK_CFG, fsrc, { group }), fatigueCard(cFatigue, fsrc),
-    reactionChart(cReact, () => sum.episodes), ...(hasAir ? [lineChart(cAir, AIR_CFG, withAir(src), { group })] : [])];
+    reactionChart(cReact, () => sum.episodes), ...(hasAir ? [lineChart(cAir, AIR_CFG, withAir(src), { group })] : []),
+    ...(hasMotors ? [lineChart(cMotors, MOTOR_CFG, withMotors(src), { group })] : [])];
   reportCharts.forEach((c) => c.render());
   document.title = `${s.label || `Session ${s.id}`} — DriverGuardian report`;
 }
@@ -2107,8 +2200,215 @@ document.addEventListener("keydown", (e) => {
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => ({ live: liveCharts, history: historyCharts, report: reportCharts, compare: compareCharts }[view] || []).forEach((c) => c.render()), 150);
+  resizeTimer = setTimeout(() => ({ live: liveCharts, history: historyCharts, incidents: incCharts, report: reportCharts, compare: compareCharts }[view] || []).forEach((c) => c.render()), 150);
 });
+
+/* ================================================================ incidents (the black box) */
+/* An incident is ~30 s around one dangerous moment, kept with its camera frames
+   (app/incidents.py). The page: a list, and for one incident a frame player, the
+   facts at the trigger, what happened when, and its readings on charts that
+   scrub the player as you hover them. */
+let incidents = [], incSel = null, incCharts = [], incPlayer = null, incSeen = null;
+const INC_KIND = { high_risk: ["car", "Pull-over"], emergency_stop: ["stop", "Emergency stop"], link_lost: ["bt", "Link lost"], manual: ["flag", "Saved by hand"] };
+async function loadIncidents(open) {
+  let r;
+  try { r = await getJSON("/api/incidents"); }
+  catch (e) { $("inc-list").replaceChildren(el("div", "empty", "Incident recording is unavailable")); return; }
+  incidents = r.incidents;
+  incSeen = incidents.length ? incidents[0].id : null;
+  try { localStorage.setItem("dg-inc-seen", incSeen || ""); } catch (e) { /* private window */ }
+  renderIncBadge();
+  $("inc-keep").textContent = `newest ${r.keep} kept`;
+  renderIncidentList();
+  const want = open || incSel || (incidents[0] && incidents[0].id);
+  if (want && incidents.some((i) => i.id === want)) { if (want !== incSel || open) openIncident(want); }
+  else { incSel = null; $("inc-detail").replaceChildren(incEmpty(r.recording)); }
+}
+function incEmpty(recording) {
+  const c = el("div", "card empty-detail inc-empty");
+  c.append(icon(recording ? "camera" : "check", "i big"),
+    el("b", null, recording ? "Recording an incident now…" : "No incidents"),
+    el("p", null, recording ? "It appears here about 10 s after the moment that started it."
+      : "Nothing dangerous has happened since the black box was switched on. Incidents are kept even when their session is deleted."));
+  return c;
+}
+function renderIncidentList() {
+  const list = $("inc-list");
+  if (!incidents.length) { list.replaceChildren(el("div", "empty", "No incidents yet")); return; }
+  list.replaceChildren(...incidents.map((inc, i) => {
+    const b = el("button", "hist-item inc-item");
+    b.style.setProperty("--i", String(Math.min(i, 12)));
+    b.setAttribute("role", "option");
+    b.setAttribute("aria-selected", String(inc.id === incSel));
+    const first = inc.triggers[0] || {}, [ic] = INC_KIND[first.kind] || ["alert"];
+    const t1 = el("div", "t1"); t1.append(icon(ic, "i inc-ic"), el("span", null, incTitle(first)));
+    b.append(t1, el("div", "t2", `${dateLabel(inc.ts)}${inc.triggers.length > 1 ? `, ${inc.triggers.length} triggers` : ""}${inc.session_label ? ` — ${inc.session_label}` : ""}`));
+    b.onclick = () => { if (incSel !== inc.id) openIncident(inc.id); };
+    return b;
+  }));
+}
+const incTitle = (t) => String(t.title || "Incident").split(" - ")[0];
+function renderIncBadge() {
+  const s = state && state.incident, b = $("inc-badge");
+  let seen = incSeen;
+  if (seen == null) { try { seen = localStorage.getItem("dg-inc-seen"); } catch (e) { seen = null; } }
+  b.hidden = !(s && s.recording) && !(s && s.latest && s.latest !== seen);
+  b.classList.toggle("rec", !!(s && s.recording));
+}
+
+async function openIncident(id) {
+  incSel = id;
+  renderIncidentList();
+  if (location.hash !== `#incidents/${id}`) history.replaceState(null, "", `#incidents/${id}`);
+  let inc;
+  try { inc = await getJSON(`/api/incidents/${id}`); }
+  catch (e) { toast("Could not load the incident", true); return; }
+  if (incSel !== id) return;
+  if (incPlayer) incPlayer.pause();
+  const detail = $("inc-detail"), a = inc.at_trigger || {};
+  const first = inc.triggers[0] || {};
+
+  // header: what, when, and the two things you do with it
+  const head = el("div", "card inc-head");
+  const titles = el("div", "titles");
+  titles.append(el("h2", "inc-title", incTitle(first)),
+    el("div", "sub", `${new Date(inc.ts * 1000).toLocaleString([], { dateStyle: "full", timeStyle: "medium" })}${inc.session_label ? ` · ${inc.session_label}` : ""}`));
+  const acts = el("div", "inc-acts");
+  const dl = el("a", "btn primary"); dl.href = `/api/incidents/${id}.zip`; dl.append(icon("download"), el("span", null, "Download evidence (ZIP)"));
+  dl.title = "Camera frames, readings as CSV and a written summary";
+  const del = el("button", "danger"); del.append(icon("trash"), el("span", null, "Delete"));
+  del.onclick = async () => {
+    if (!(await dialog({ title: "Delete this incident?", body: "Its camera frames and readings will be removed permanently. Download the evidence first if anyone may need it.", confirm: "Delete", danger: true }))) return;
+    try { await api("DELETE", `/api/incidents/${id}`); toast("Incident deleted"); incSel = null; loadIncidents(); }
+    catch (e) { toast(`Delete failed: ${e.message}`, true); }
+  };
+  acts.append(dl, del);
+  head.append(titles, acts);
+
+  // the player
+  const pcard = el("div", "card inc-player-card");
+  incPlayer = incidentPlayer(pcard, inc);
+
+  // facts at the trigger
+  const facts = el("div", "card inc-facts");
+  facts.append(el("div", "card-h", null));
+  facts.firstChild.append(el("h2", null, "At the moment it started"));
+  const dl2 = el("dl", "inc-fl");
+  const yes = (b) => (b ? "Yes" : "No");
+  const fact = (k, v, tone) => { const d = el("div", tone ? `f ${tone}` : "f"); d.append(el("dt", null, k), el("dd", null, v)); dl2.append(d); };
+  fact("Risk", `${lv(a.risk).word}${a.case && a.case !== "NONE" ? ` — ${caseName(a.case)}` : ""}`, a.risk === "HIGH" ? "crit" : a.risk === "MEDIUM" ? "warn" : "");
+  fact("Driver", a.face_found ? "Face tracked" : a.driver === "DRIVER_ABSENT" ? "Absent" : "Face not seen", a.face_found ? "" : "warn");
+  fact("Eyes closed", a.eyes_closed ? `Yes${a.eyes_closed_s ? `, for ${fmt(a.eyes_closed_s, 1)} s` : ""}` : "No", a.eyes_closed ? "crit" : "");
+  fact("Phone in hand", yes(a.phone), a.phone ? "warn" : "");
+  fact("Seatbelt", a.seatbelt === "ON" ? "On" : a.seatbelt === "OFF" ? "Off" : "Unknown", a.seatbelt === "OFF" ? "crit" : "");
+  fact("Motors", a.left_pwm == null ? "No data" : `${a.left_pwm} / ${a.right_pwm} PWM`);
+  fact("Front distance", a.front_cm == null ? (a.left_pwm == null ? "No data" : "Clear") : `${fmt(a.front_cm, 0)} cm`, a.front_cm != null && a.front_cm <= 10 ? "crit" : "");
+  fact("Emergency stop", a.estop ? (a.estop === "obstacle" ? "Obstacle" : "Edge") : "No", a.estop ? "crit" : "");
+  facts.append(dl2);
+
+  // what happened, in order
+  const tl = el("div", "card inc-steps");
+  tl.append(el("div", "card-h", null)); tl.firstChild.append(el("h2", null, "What happened"));
+  const ol = el("ol", "inc-ol");
+  inc.triggers.forEach((t) => {
+    const li = el("li"); const [ic] = INC_KIND[t.kind] || ["alert"];
+    const go = el("button", "inc-step"); go.append(el("span", "when", t.offset_s ? `+${fmt(t.offset_s, 1)} s` : "0 s"), icon(ic), el("span", null, t.title));
+    go.onclick = () => incPlayer.seek(t.offset_s, true);
+    li.append(go); ol.append(li);
+  });
+  tl.append(ol);
+
+  // readings
+  const rows = (inc.samples || []).map((r) => ({ ...r, t: r.offset_s }));
+  const t0 = -inc.pre_s, t1 = inc.duration_s - inc.pre_s;
+  const markers = inc.triggers.map((t) => ({ t: t.offset_s, title: t.title }));
+  const src = () => ({ rows, t0, t1, gap: 1, step: 0.2, relAxis: true, markers, label: "the incident" });
+  const grid = el("div", "detail-charts");
+  const cRisk = el("div", "card wide"), cLanes = el("div", "card wide"), cMot = el("div", "card wide"), cEar = el("div", "card"), cHead = el("div", "card");
+  grid.append(cRisk, cLanes, cMot, cEar, cHead);
+  const group = syncGroup();
+  group.add({ showT: (t) => incPlayer.seek(t), clearT() {} });       // hovering a chart scrubs the camera
+  incCharts = [riskChart(cRisk, src, { group }), lanesChart(cLanes, src, { group }),
+    lineChart(cMot, MOTOR_CFG, withMotors(src), { group }), lineChart(cEar, EAR_CFG, src, { group }), lineChart(cHead, HEAD_CFG, src, { group })];
+  incPlayer.onTime = (t) => incCharts.forEach((c) => c.showT && c.showT(t));
+
+  const side = el("div", "inc-side"); side.append(facts, tl);
+  const top = el("div", "inc-main"); top.append(pcard, side);
+  detail.replaceChildren(head, top, grid);
+  incCharts.forEach((c) => c.render());
+  incPlayer.seek(0);
+}
+
+/* The camera frames as a player: play/pause, scrub, jump to the trigger, half speed. */
+function incidentPlayer(card, inc) {
+  const times = inc.frames || [], n = times.length;
+  const stage = el("div", "inc-stage"), img = el("img"); img.alt = "Camera frame from the incident";
+  const badge = el("div", "inc-time"), live = el("div", "inc-flag");
+  stage.append(img, badge, live);
+  const bar = el("div", "inc-bar");
+  const play = el("button", "icon-btn inc-play"); play.setAttribute("aria-label", "Play");
+  const range = el("input"); range.type = "range"; range.min = "0"; range.max = String(Math.max(0, n - 1)); range.step = "1";
+  range.setAttribute("aria-label", "Position in the incident");
+  const track = el("div", "inc-track"); track.append(range);
+  const span = Math.max(0.1, (times[n - 1] || 0) - (times[0] || 0));
+  inc.triggers.forEach((t) => { const m = el("i", "inc-tick"); m.style.left = `${(((t.offset_s - (times[0] || 0)) / span) * 100).toFixed(2)}%`; m.title = t.title; track.append(m); });
+  const toTrig = el("button", "inc-jump"); toTrig.append(icon("flag"), el("span", null, "Trigger"));
+  const speed = el("button", "inc-speed", "1×"); speed.setAttribute("aria-label", "Playback speed");
+  bar.append(play, track, toTrig, speed);
+  card.append(stage, bar);
+  if (!n) { stage.replaceChildren(el("div", "empty", "No camera frames were saved for this incident")); return { seek() {}, pause() {}, onTime: null }; }
+
+  // frames never change: preload them all so scrubbing is instant
+  const urls = times.map((_, i) => `/api/incidents/${inc.id}/${i}.jpg`);
+  urls.forEach((u) => { const p = new Image(); p.src = u; });
+  let i = 0, timer = null, rate = 1;
+  const self = { onTime: null };
+  const nearest = (t) => { let best = 0; for (let k = 0; k < n; k++) if (Math.abs(times[k] - t) < Math.abs(times[best] - t)) best = k; return best; };
+  function show(k, fromUser) {
+    i = Math.max(0, Math.min(n - 1, k));
+    img.src = urls[i];
+    range.value = String(i);
+    const t = times[i];
+    badge.textContent = `${t >= 0 ? "+" : "−"}${fmt(Math.abs(t), 1)} s  ·  ${clock(inc.ts + t)}`;
+    const hit = inc.triggers.find((x) => Math.abs(x.offset_s - t) < 0.6);
+    live.textContent = hit ? hit.title : t < 0 ? "Before" : "After";
+    live.className = `inc-flag${hit ? " on" : ""}`;
+    if (fromUser && self.onTime) self.onTime(t);
+  }
+  function step() {
+    if (i >= n - 1) { self.pause(); return; }
+    const dt = (times[i + 1] - times[i]) * 1000 / rate;
+    show(i + 1, true);
+    timer = setTimeout(step, Math.max(40, dt));
+  }
+  self.play = () => { if (timer) return; if (i >= n - 1) show(0); play.classList.add("on"); play.replaceChildren(icon("pause")); play.setAttribute("aria-label", "Pause"); step(); };
+  self.pause = () => { clearTimeout(timer); timer = null; play.classList.remove("on"); play.replaceChildren(icon("play")); play.setAttribute("aria-label", "Play"); };
+  self.seek = (t, fromUser) => show(nearest(t), fromUser);
+  play.replaceChildren(icon("play"));
+  play.onclick = () => (timer ? self.pause() : self.play());
+  range.oninput = () => { self.pause(); show(Number(range.value), true); };
+  toTrig.onclick = () => { self.pause(); show(nearest(0), true); };
+  speed.onclick = () => { rate = rate === 1 ? 0.5 : rate === 0.5 ? 0.25 : 1; speed.textContent = rate === 1 ? "1×" : rate === 0.5 ? "½×" : "¼×"; };
+  stage.onclick = () => play.click();
+  return self;
+}
+$("btn-save-inc").onclick = async () => {
+  try { await api("POST", "/api/control", { action: "save_incident" }); toast("Saving: the last 20 s and the next 10 s"); }
+  catch (e) { toast(`Could not save: ${e.message}`, true); }
+};
+
+/* ================================================================ press feel */
+/* Buttons light up from the point you press (style.css: --px/--py + --glow) and, on
+   phones that can, give one short tick for the actions that change something. */
+const canBuzz = "vibrate" in navigator && matchMedia("(pointer: coarse)").matches;
+document.addEventListener("pointerdown", (e) => {
+  const b = e.target.closest("button, a.btn");
+  if (!b || b.disabled) return;
+  const r = b.getBoundingClientRect();
+  b.style.setProperty("--px", `${e.clientX - r.left}px`);
+  b.style.setProperty("--py", `${e.clientY - r.top}px`);
+  if (canBuzz && b.matches(".primary, .danger, [role=tab], .seg button, .inc-play")) navigator.vibrate(8);
+}, { passive: true });
 
 /* ================================================================ start */
 route();
@@ -2118,3 +2418,4 @@ setInterval(pollHistory, 1000);
 setInterval(pollEvents, 1000);
 setInterval(() => { if (state) renderHero(); setConnection(); }, 1000);
 setInterval(() => { if (view === "history") loadHistory(); }, 10000);
+setInterval(() => { if (view === "incidents") loadIncidents(); }, 10000);
