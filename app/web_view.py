@@ -60,7 +60,7 @@ _CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charse
                   ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
                   ".woff2": "font/woff2"}   # manrope.woff2: bundled UI font (SIL OFL, manrope-OFL.txt)
 _ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute",
-            "test_start", "test_stop", "save_incident"}
+            "test_start", "test_stop", "save_incident", "incidents_on", "incidents_off"}
 _PIN_MAX_FAILS, _PIN_LOCK_SEC = 5, 60.0
 
 

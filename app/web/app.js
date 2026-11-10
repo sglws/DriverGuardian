@@ -393,6 +393,7 @@ function renderLive() {
   renderVehicle();
   renderHeroMotors();
   renderIncBadge();
+  renderIncSwitch();
   renderTest();
   renderDiagSummary();
   if ($("diag").open) renderPanels();
@@ -742,17 +743,18 @@ function renderVehicle() {
     box.dataset.k = "";
     return;
   }
-  const frag = document.createDocumentFragment();
-  if (v.estop) frag.append(vehBanner("crit", "stop", v.estop === "obstacle" ? "Emergency stop — obstacle within 10 cm" : "Emergency stop — edge of the surface detected"));
-  else if (v.risk === "HIGH" && v.pullover_s > 0) {
-    const done = !v.left_pwm && !v.right_pwm;
-    frag.append(vehBanner("crit", "car", done ? "Pull-over finished — stopped" : `Pulling over to the right — ${fmt(v.pullover_s, 0)} s so far`));
-  }
-  if (v.link_failed) frag.append(vehBanner("warn", "bt", "The ESP32 lost the Pi's heartbeat — its fail-safe is active"));
+  // One status line that is always there: a flickering sensor changes its words and
+  // colour, never the card's height (which moved everything below it).
+  const frag = document.createDocumentFragment(), fs = v.link_failed ? " · Bluetooth fail-safe active" : "";
+  if (v.estop) frag.append(vehBanner("crit", "stop", (v.estop === "obstacle" ? "Emergency stop — obstacle within 10 cm" : "Emergency stop — edge of the surface") + fs));
+  else if (v.risk === "HIGH" && v.pullover_s > 0)
+    frag.append(vehBanner("crit", "car", (!v.left_pwm && !v.right_pwm ? "Pull-over finished — stopped" : `Pulling over to the right — ${fmt(v.pullover_s, 0)} s so far`) + fs));
+  else if (v.link_failed) frag.append(vehBanner("warn", "bt", "The ESP32 lost the Pi's heartbeat — its fail-safe is active"));
+  else frag.append(vehBanner("ok", "check", "No obstacle, on the surface, Bluetooth link fine"));
   const grid = el("div", "veh-grid");
   const tile = (ic, k, val, sub, tone) => {
     const t = el("div", `vt ${tone || ""}`), kk = el("div", "k"); kk.append(icon(ic), document.createTextNode(k));
-    t.append(kk, el("div", "v", val)); if (sub) t.append(el("div", "s", sub)); grid.append(t); return t;
+    t.append(kk, el("div", "v", val), el("div", "s", sub || "\u00a0")); grid.append(t); return t;   // the line is always there: same height
   };
   const motor = (k, pwm) => {
     const t = tile("gauge", k, `${pwm} PWM`, pwm ? `${Math.round((pwm / 255) * 100)} % of full power (255)` : "stopped");
@@ -762,7 +764,7 @@ function renderVehicle() {
   motor("Left motors", v.left_pwm);
   motor("Right motors", v.right_pwm);
   const dist = (k, d) => {
-    const near = d != null && d <= 10, t = tile("ruler", k, d == null ? "Clear" : `${fmt(d, 0)} cm`, d == null ? "nothing within 1 m" : near ? "within the 10 cm stop distance" : "", near ? "crit" : "");
+    const near = d != null && d <= 10, t = tile("ruler", k, d == null ? "Clear" : `${fmt(d, 0)} cm`, d == null ? "nothing within 1 m" : near ? "inside the 10 cm stop zone" : "", near ? "crit" : "");
     const m = el("div", "meter dist"), f = el("i"); f.style.width = `${d == null ? 100 : Math.min(100, d)}%`;
     const th = el("b"); th.style.left = "10%"; th.title = "10 cm stop distance"; m.append(f, th); t.append(m);
   };
@@ -825,7 +827,7 @@ function renderHeroMotors() {
   $("mo-note").textContent = note;
 }
 function vehBanner(tone, ic, text) {
-  const b = el("div", `veh-banner ${tone}`); const t = el("div", "t"); t.append(icon(ic), document.createTextNode(text)); b.append(t); return b;
+  const b = el("div", `veh-banner ${tone}`); const t = el("div", "t"); t.append(icon(ic), el("span", null, text)); b.append(t); return b;
 }
 
 /* ---------- diagnostics drawer: a one-line summary while it is closed */
@@ -2312,7 +2314,8 @@ async function openIncident(id) {
   const ol = el("ol", "inc-ol");
   inc.triggers.forEach((t) => {
     const li = el("li"); const [ic] = INC_KIND[t.kind] || ["alert"];
-    const go = el("button", "inc-step"); go.append(el("span", "when", t.offset_s ? `+${fmt(t.offset_s, 1)} s` : "0 s"), icon(ic), el("span", null, t.title));
+    const go = el("button", "inc-step"); go.append(el("span", "when", t.offset_s ? `+${fmt(t.offset_s, 1)} s` : "0 s"), icon(ic),
+      el("span", null, t.repeats ? `${t.title} — and ${t.repeats} more time${t.repeats === 1 ? "" : "s"}` : t.title));
     go.onclick = () => incPlayer.seek(t.offset_s, true);
     li.append(go); ol.append(li);
   });
@@ -2392,6 +2395,25 @@ function incidentPlayer(card, inc) {
   stage.onclick = () => play.click();
   return self;
 }
+/* The black box switch: on by default; off stops keeping the camera at all. */
+function renderIncSwitch() {
+  const s = state && state.incident;
+  if (!s) return;
+  const on = s.active !== false, sw = $("inc-switch");
+  sw.setAttribute("aria-checked", String(on));
+  $("inc-switch-lbl").textContent = on ? "Black box on" : "Black box off";
+  $("inc-switch-note").hidden = on;
+  $("btn-save-inc").disabled = !on;
+  $("btn-save-inc").title = on ? "Keep the last 20 s and the next 10 s as an incident" : "Switch the black box on first";
+}
+$("inc-switch").onclick = async () => {
+  const on = $("inc-switch").getAttribute("aria-checked") === "true";
+  if (on && !(await dialog({ title: "Switch the black box off?", confirm: "Switch off", danger: true,
+    body: "Until you switch it back on, nothing is recorded around dangerous moments — not even an emergency stop. Saved incidents are kept." }))) return;
+  $("inc-switch").setAttribute("aria-checked", String(!on));        // move at once; the next state confirms it
+  try { await api("POST", "/api/control", { action: on ? "incidents_off" : "incidents_on" }); toast(on ? "Black box off" : "Black box on"); }
+  catch (e) { $("inc-switch").setAttribute("aria-checked", String(on)); toast(`Could not switch: ${e.message}`, true); }
+};
 $("btn-save-inc").onclick = async () => {
   try { await api("POST", "/api/control", { action: "save_incident" }); toast("Saving: the last 20 s and the next 10 s"); }
   catch (e) { toast(`Could not save: ${e.message}`, true); }

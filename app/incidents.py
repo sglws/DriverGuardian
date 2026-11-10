@@ -54,18 +54,21 @@ class BlackBox:
         self._open = None                         # the incident being recorded
         self._prev = {}
         self._manual = None                       # a reason, when the dashboard asked to save now
+        self._last_kind = {}                      # trigger kind -> when it last started an incident
         self._list_cache = None
         self._latest = None                       # newest saved incident id (the dashboard's badge)
+        self.active = False                       # switched on/off from the dashboard; remembered in settings.json
         if self.enabled:
             os.makedirs(self.root, exist_ok=True)
             self._latest = max(self._ids(), default=None)
+            self.active = self._read_settings().get("active", True)
             threading.Thread(target=self._encoder, daemon=True, name="blackbox-jpeg").start()
 
     # ------------------------------------------------------------ main loop (fast)
 
     def add_frame(self, frame, now: float):
         """Called every frame; keeps INCIDENT_FPS of them. Never blocks."""
-        if not self.enabled or now - self._last_frame < 1.0 / config.INCIDENT_FPS:
+        if not self.active or now - self._last_frame < 1.0 / config.INCIDENT_FPS:
             return
         self._last_frame = now
         h, w = frame.shape[:2]
@@ -82,11 +85,24 @@ class BlackBox:
     def update(self, state: dict, sample: dict, now: float, session_id=None, session_label=""):
         """Called with every dashboard state (session.py). Returns the titles
         of triggers that opened or joined an incident, for the event log."""
-        if not self.enabled:
+        if not self.active:
             return []
         with self._lock:
             self._samples.append(sample)
             fired = self._triggers(state)
+            if fired and self._open is None:
+                # a flickering sensor (an obstacle at ~10 cm) must not fill the list with copies
+                # and push real incidents out: a kind that just started one waits its cooldown
+                fired = [f for f in fired if f[1] == "manual"
+                         or now - self._last_kind.get(f[1], -1e9) >= config.INCIDENT_COOLDOWN_SEC]
+            if fired and self._open is not None:
+                # the same trigger again (a flickering sensor): counted once, and it doesn't keep
+                # the incident open; a different trigger joins it and extends it
+                have = {t["kind"]: t for t in self._open["triggers"]}
+                for title, kind in fired:
+                    if kind in have:
+                        have[kind]["repeats"] = have[kind].get("repeats", 0) + 1
+                fired = [f for f in fired if f[1] not in have]
             if fired:
                 if self._open is None:
                     wall = time.time()
@@ -98,6 +114,7 @@ class BlackBox:
                     self._open["end"] = min(self._open["t0"] + config.INCIDENT_MAX_SEC,
                                             now + config.INCIDENT_POST_SEC)
                 for title, kind in fired:
+                    self._last_kind[kind] = now
                     self._open["triggers"].append({"offset_s": round(now - self._open["t0"], 2),
                                                    "kind": kind, "title": title})
             if self._open is not None and now >= self._open["end"]:
@@ -106,7 +123,39 @@ class BlackBox:
 
     def status(self):
         with self._lock:
-            return {"recording": self._open is not None, "id": self._open["id"] if self._open else None, "latest": self._latest}
+            return {"active": self.active, "recording": self._open is not None,
+                    "id": self._open["id"] if self._open else None, "latest": self._latest}
+
+    def set_active(self, on: bool):
+        """Switch the black box on or off. Off: an incident being recorded is
+        saved with what there is, and the frames in memory are dropped - the
+        camera is no longer kept at all."""
+        if not self.enabled:
+            return
+        on = bool(on)
+        with self._lock:
+            if on == self.active:
+                return
+            self.active = on
+            if not on:
+                if self._open is not None:
+                    self._finish()
+                self._frames.clear()
+                self._samples.clear()
+                self._prev = {}           # back on: the current state is not a new trigger
+        try:
+            _dump(os.path.join(self.root, "settings.json"), {"active": on})
+        except OSError as e:
+            print(f"[incident] could not remember the setting: {e}")
+        print(f"[incident] black box {'on' if on else 'off'}")
+
+    def _read_settings(self):
+        try:
+            with open(os.path.join(self.root, "settings.json")) as f:
+                d = json.load(f)
+            return d if isinstance(d, dict) else {}
+        except (OSError, ValueError):
+            return {}
 
     def save_now(self, reason="Saved from the dashboard"):
         """A manual incident: the last INCIDENT_PRE_SEC plus what follows."""
@@ -346,7 +395,8 @@ def _summary_text(m):
         f"Recording:  {m['pre_s']:.0f} s before to {m['duration_s'] - m['pre_s']:.0f} s after the first trigger",
         "",
         "What happened (seconds after the first trigger):",
-        *[f"  +{t['offset_s']:5.1f} s  {t['title']}" for t in m.get("triggers") or []],
+        *[f"  +{t['offset_s']:5.1f} s  {t['title']}" + (f" (and {t['repeats']} more times)" if t.get("repeats") else "")
+          for t in m.get("triggers") or []],
         "",
         "At the moment of the first trigger:",
         f"  Risk:            {a.get('risk')} ({_case_name(a.get('case'))})",

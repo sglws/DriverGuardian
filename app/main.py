@@ -327,6 +327,11 @@ def main():
                     tests.stop(time.monotonic())
                 elif action == "save_incident":
                     blackbox.save_now("Saved from the dashboard")
+                elif action in ("incidents_on", "incidents_off"):
+                    blackbox.set_active(action == "incidents_on")
+                    recorder.log("system", "info" if action == "incidents_on" else "warning",
+                                 "Black box on" if action == "incidents_on" else "Black box off",
+                                 "incidents are recorded" if action == "incidents_on" else "no incidents are recorded until it is switched back on")
                 elif action == "new_session":
                     tests.stop(time.monotonic(), "new session started")
                     sync_tests()

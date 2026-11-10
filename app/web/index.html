@@ -236,9 +236,14 @@
       <p class="inc-intro">The black box. When the risk turns High, the car makes an emergency stop or the ESP32 loses the Pi,
         the camera and every reading from 20 s before to 10 s after are kept here — even after the session is deleted.</p>
     </div>
-    <button class="danger" id="btn-save-inc" title="Keep the last 20 s and the next 10 s as an incident">
-      <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/></svg><span>Save the last 30 s</span></button>
+    <div class="inc-ctl">
+      <button class="switch" role="switch" id="inc-switch" aria-checked="true" aria-describedby="inc-switch-note">
+        <span class="track"><span class="knob"></span></span><span class="lbl" id="inc-switch-lbl">Black box on</span></button>
+      <button class="danger" id="btn-save-inc" title="Keep the last 20 s and the next 10 s as an incident">
+        <svg class="i" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="3.5"/></svg><span>Save the last 30 s</span></button>
+    </div>
   </div>
+  <p class="inc-off-note" id="inc-switch-note" hidden>The black box is off: the camera is not kept and no incidents are recorded. Saved incidents stay below.</p>
   <div class="history">
     <aside class="card hist-list-card">
       <div class="card-h"><h2>Recorded incidents</h2><span class="sub" id="inc-keep"></span></div>

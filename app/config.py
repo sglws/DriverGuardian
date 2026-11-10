@@ -119,6 +119,7 @@ INCIDENTS_KEEP = 30
 INCIDENT_PRE_SEC = 20
 INCIDENT_POST_SEC = 10
 INCIDENT_MAX_SEC = 40           # retriggers keep it open, but never longer than this after the first
+INCIDENT_COOLDOWN_SEC = 60      # the same trigger can't start a new incident this soon (a flickering sensor)
 INCIDENT_FPS = 5
 INCIDENT_WIDTH = 640
 INCIDENT_JPEG_QUALITY = 72
