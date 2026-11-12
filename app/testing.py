@@ -21,6 +21,8 @@ While a test runs the risk is WAITING (case TEST): no alerts, and the ESP32
 holds the car stopped. Results go to the session's event log and summary.
 """
 
+import csv
+import os
 import time
 
 import cv2
@@ -39,7 +41,7 @@ FACE_SCRIPT = [
     ("CLOSED", "T_CLOSED", "Close your eyes - open them at the next tone", 4.0),
     ("OPEN",   "T_BLINK",  "Eyes open, blink normally", 5.0),
     ("TALK",   "T_TALK",   "Talk or count out loud, eyes open", 6.0),
-    ("YAWN",   "T_YAWN",   "Yawn - open your mouth wide and hold it", 6.0),
+    ("YAWN",   "T_YAWN",   "Yawn - open your mouth wide and hold it", 9.0),   # the spoken prompt takes ~2.5 s, then a yawn must be held 3.2 s
     ("OPEN",   "T_RELAX",  "Relax - eyes open, mouth closed", 4.0),
 ]
 EYE_LABEL = {"OPEN": "open", "CLOSED": "closed", "TALK": "open", "YAWN": ""}
@@ -68,7 +70,8 @@ def score_face(rows):
     steps = {}
     for r in rows:
         s = steps.setdefault((r.get("condition"), r["round"], r["step_id"]), {"step": r["step"], "yawn": False})
-        s["yawn"] |= b(r["is_yawning"])
+        if b(r["scored"]):   # the reaction-time part of a step is not scored (a yawn still ending doesn't count)
+            s["yawn"] |= b(r["is_yawning"])
     yawn_steps = [s for s in steps.values() if s["step"] == "YAWN"]
     other_steps = [s for s in steps.values() if s["step"] in ("OPEN", "TALK", "CLOSED")]
     talk_steps = [s for s in steps.values() if s["step"] == "TALK"]
@@ -347,6 +350,7 @@ class TestController:
         if kind == "face":
             res.update(condition=self.condition, rounds=self.rounds, rounds_done=self.round,
                        **score_face(self.rows))
+            self._save_rows(res["ts"])
             ok = res["frames"] > 0
             e, y = res["eye"], res["yawn"]
             passed = ok and e["pass"] and y["pass"]
@@ -378,6 +382,20 @@ class TestController:
                                  f"{res['title']}: {'PASS' if passed else 'FAIL'}", detail))
             self._say("T_DONE", now)
         self._seq += 1
+
+    def _save_rows(self, ts):
+        """Keep every frame of the run (data/face_test_<time>.csv) so a result can be checked frame by frame."""
+        if not self.rows:
+            return
+        try:
+            os.makedirs(config.DATA_DIR, exist_ok=True)
+            path = os.path.join(config.DATA_DIR, f"face_test_{time.strftime('%Y%m%d_%H%M%S', time.localtime(ts))}.csv")
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=list(self.rows[0]))
+                w.writeheader()
+                w.writerows(self.rows)
+        except OSError:
+            pass   # a failed save must never stop the test result
 
     def status(self, now):
         """For the dashboard."""

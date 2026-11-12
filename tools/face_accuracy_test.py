@@ -15,7 +15,7 @@ Guided script (one round, ~31 s; default 3 rounds per run):
     CLOSED  eyes closed (count to 4)          4 s
     OPEN    eyes open, blink normally         5 s
     TALK    talk / count out loud             6 s   <- must NOT count as a yawn
-    YAWN    yawn: mouth wide, hold            6 s
+    YAWN    yawn: mouth wide, hold            9 s
     OPEN    relax                             4 s
 A beep (terminal bell) marks every step change, so the CLOSED step works
 without watching the screen. The first GUARD_SEC of each step is excluded
@@ -54,7 +54,7 @@ SCRIPT = [
     ("CLOSED", "CLOSE your eyes - count to 4, open at the beep", 4.0),
     ("OPEN",   "Eyes OPEN, blink normally", 5.0),
     ("TALK",   "TALK / count out loud, eyes open", 6.0),
-    ("YAWN",   "YAWN - open mouth wide and hold until the beep", 6.0),
+    ("YAWN",   "YAWN - open mouth wide and hold until the beep", 9.0),
     ("OPEN",   "Relax - eyes open, mouth closed", 4.0),
 ]
 EYE_LABEL = {"OPEN": "open", "CLOSED": "closed", "TALK": "open", "YAWN": ""}

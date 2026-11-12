@@ -48,7 +48,7 @@ class DrowsinessDetector:
 
     @property
     def open_mouth_threshold(self) -> float:
-        return self.baseline_mar * config.MAR_YAWN_RATIO
+        return max(self.baseline_mar * config.MAR_YAWN_RATIO, config.MAR_OPEN_MIN)
 
     def update(self, smoothed_ear: float, now: float, pitch_delta: float = 0.0,
                smoothed_mar: float = 0.0, face_found: bool = True):

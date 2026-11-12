@@ -146,6 +146,12 @@ MAR_SMOOTHING_FRAMES = 3
 # short duration, which is what was causing normal talking to register as
 # yawning. Both raised so only a genuine wide, held-open mouth counts:
 MAR_YAWN_RATIO = 2.6            # mouth counted "open" once MAR exceeds this multiple of baseline
+# The ratio alone fails: with the mouth closed the two inner-lip points almost
+# touch, so the calibrated baseline is ~0.004 and 2.6 x baseline is only ~0.01 -
+# any slightly parted lips (talking, breathing, a smile) counted as "open".
+# Measured MAR: speech stays under ~0.3, a yawn reaches 0.45-0.7, so the mouth
+# must exceed this absolute value as well.
+MAR_OPEN_MIN = 0.35
 YAWN_MIN_DURATION_SEC = 3.2     # must stay open this long to count as a yawn, not talking/a word
 YAWN_RATE_WINDOW_SEC = 10.0     # window for counting repeated yawns
 YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still LOW-risk) signal
