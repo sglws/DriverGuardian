@@ -108,61 +108,14 @@ SESSION_HISTORY_KEEP = 20
 DATA_DIR = os.path.join(BASE_DIR, "data")
 SESSION_DB_PATH = os.path.join(DATA_DIR, "driverguardian.db")
 
-# Incidents - the black box (app/incidents.py). When the risk turns HIGH, the
-# ESP32 makes an emergency stop or loses the Pi, the camera frames and
-# readings from INCIDENT_PRE_SEC before to INCIDENT_POST_SEC after are saved
-# to INCIDENTS_DIR and shown on the dashboard's Incidents page. ~10 MB of RAM;
-# ~3-5 MB of disk per incident; the newest INCIDENTS_KEEP are kept.
-INCIDENTS_ENABLED = True
-INCIDENTS_DIR = os.path.join(DATA_DIR, "incidents")
-INCIDENTS_KEEP = 30
-INCIDENT_PRE_SEC = 20
-INCIDENT_POST_SEC = 10
-INCIDENT_MAX_SEC = 40           # retriggers keep it open, but never longer than this after the first
-INCIDENT_COOLDOWN_SEC = 60      # the same trigger can't start a new incident this soon (a flickering sensor)
-INCIDENT_FPS = 5
-INCIDENT_WIDTH = 640
-INCIDENT_JPEG_QUALITY = 72
-
 # CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
 # keeps the desktop, audio and Bluetooth responsive under full load.
 APP_NICE = 10
-# How many processed frames per actual cv2.imshow() call - 1 means every
-# frame (default, no behavior change). This app's Qt build has no OpenGL
-# support (confirmed via cv2.getBuildInformation()), so every displayed
-# frame is a full 1280x720 software-rendered push into the compositor -
-# forcing XWayland instead of native Wayland didn't fix a reported freeze,
-# which (combined with cv2.imshow() itself always timing fast in
-# [PROFILE] - "display" stage - even during a freeze) points at the
-# compositor's own async rendering of what gets handed to it, not the
-# handoff itself. Showing fewer, not smaller, frames tests whether cutting
-# that sustained software-rendering load reduces how often it happens.
-# cv2.waitKey() still runs every frame regardless (see main.py) - it
-# processes GUI/keyboard events for the window, unrelated to whether a
-# new frame was actually pushed that iteration.
-# 1 = the preview updates on every processed frame. 2 (half rate) was tried
-# to lighten the compositor load but made the desktop feel worse on the Pi,
-# not better - left at 1. Try DG_DISPLAY_EVERY=2 for a one-off comparison.
-DISPLAY_EVERY_N_FRAMES = 1
-# Scale factor applied to the preview frame just before cv2.imshow() -
-# 1.0 means no resize. Detection is completely unaffected: everything
-# (MediaPipe, YOLO, risk logic) already ran on the full-resolution frame
-# by this point, so this only shrinks what the GUI has to paint.
-#
-# Background: per-frame timing showed imshow() is ~1ms while cv2.waitKey()
-# runs ~24ms normally and spikes past 100ms during a visible stutter -
-# OpenCV's Qt backend only *queues* the repaint in imshow(), so the actual
-# software blit happens inside the event loop (i.e. inside waitKey()), and
-# this Qt build has no OpenGL support (cv2.getBuildInformation()).
-#
-# Measured results differ sharply by machine, so this stays 1.0 by default:
-#   - Windows laptop (cv2.VideoCapture/DSHOW): 0.5 cut waitKey 24.5ms ->
-#     2.2ms. Blit cost there really is proportional to pixel count.
-#   - Raspberry Pi (Wayland compositor): 0.5 changed nothing at all -
-#     waitKey stayed at 24.4ms with the same ~106ms spikes. So the Pi's
-#     waitKey cost is NOT pixel-count-bound; it looks more like blocking
-#     on compositor frame callbacks (a vsync-style wait), which no amount
-#     of shrinking the frame can avoid.
+# Scale factor for the local preview window only (1.0 = no resize); detection always runs on
+# the full frame. imshow() just queues the repaint and the software blit happens in waitKey()
+# (this Qt build has no OpenGL), so its cost follows the pixel count - but only on some
+# machines: on a Windows laptop 0.5 cut waitKey from 24.5 ms to 2.2 ms, on the Pi it changed
+# nothing. Hence 1.0 by default.
 DISPLAY_SCALE = 1.0
 
 # --------------------------------------------------------------------------
@@ -473,16 +426,6 @@ RISK_UPDATE_MIN_HZ = 1.0        # worst case: max gap = 1 / this = 1 s
 # rows/s, harmless but unnecessary outside a test run.
 RISK_UPDATE_LOG = False
 PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
-# Per-frame outlier detection (see main.py's [STUTTER] line). [PROFILE]
-# averages over 5s, which hides which *individual* frame stalled - the gap
-# that made a reported visible stutter hard to pin down even after YOLO's
-# own average dropped to ~0ms. A frame taking STUTTER_MULTIPLIER x the
-# rolling average of the last STUTTER_WINDOW_FRAMES gets logged with its
-# own per-stage breakdown, so the culprit stage is visible directly
-# instead of inferred by testing one candidate at a time.
-STUTTER_WINDOW_FRAMES = 30
-STUTTER_MIN_SAMPLES = 10   # don't flag anything until the baseline is meaningful
-STUTTER_MULTIPLIER = 2.0   # flag frames at least this many times the rolling average
 
 # --------------------------------------------------------------------------
 # ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)
@@ -585,7 +528,6 @@ ALCOHOL_DRIVE_CLEAR_RATIO = 1.3
 _ENV_OVERRIDES = {
     "DG_DISPLAY": ("DISPLAY_ENABLED", bool),
     "DG_DISPLAY_SCALE": ("DISPLAY_SCALE", float),
-    "DG_DISPLAY_EVERY": ("DISPLAY_EVERY_N_FRAMES", int),
     "DG_CAMERA_FPS": ("CAMERA_FPS", int),
     "DG_CAMERA": ("CAMERA_SOURCE", str),
     "DG_CAMERA_INDEX": ("CAMERA_INDEX", int),

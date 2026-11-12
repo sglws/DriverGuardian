@@ -223,14 +223,12 @@ function dialog({ title, body = "", confirm = "OK", danger = false, input = null
 }
 
 /* ================================================================ tabs */
-/* Views: #live, #history, #incidents[/ID], #report/ID, #compare/A/B and #kiosk (presentation). */
+/* Views: #live, #history, #report/ID, #compare/A/B and #kiosk (presentation). */
 let view = "live";
 function setView(v, args = []) {
   view = v;
   $("tab-live").setAttribute("aria-selected", String(v === "live"));
   $("tab-history").setAttribute("aria-selected", String(["history", "report", "compare"].includes(v)));
-  $("tab-incidents").setAttribute("aria-selected", String(v === "incidents"));
-  $("view-incidents").hidden = v !== "incidents";
   $("view-live").hidden = v !== "live";
   $("view-history").hidden = v !== "history";
   $("view-report").hidden = v !== "report";
@@ -239,10 +237,9 @@ function setView(v, args = []) {
   if (v !== "report") document.title = "DriverGuardian Monitor";
   if (v === "live") { startVideo(); liveCharts.forEach((c) => c.render()); } else stopVideo();
   if (v === "history") loadHistory();
-  if (v === "incidents") loadIncidents(args[0]); else incPlayer && incPlayer.pause();
   if (v === "report") renderReport(args[0]);
   if (v === "compare") renderCompare(args[0], args[1]);
-  const hash = ["report", "compare"].includes(v) || (v === "incidents" && args[0]) ? `#${[v, ...args].join("/")}` : kioskOn ? "#kiosk" : `#${v}`;
+  const hash = ["report", "compare"].includes(v) ? `#${[v, ...args].join("/")}` : kioskOn ? "#kiosk" : `#${v}`;
   if (location.hash !== hash) history.replaceState(null, "", hash);
 }
 function route() {
@@ -251,7 +248,6 @@ function route() {
   if (kioskOn) setKiosk(false);
   if (v === "report" && Number(a)) setView("report", [Number(a)]);
   else if (v === "compare" && Number(a) && Number(b)) setView("compare", [Number(a), Number(b)]);
-  else if (v === "incidents") setView("incidents", a ? [a] : []);
   else setView(v === "history" ? "history" : "live");
 }
 window.addEventListener("hashchange", route);
@@ -263,7 +259,6 @@ function goView(v) {
 }
 $("tab-live").onclick = () => { if (kioskOn) setKiosk(false); goView("live"); };
 $("tab-history").onclick = () => goView("history");
-$("tab-incidents").onclick = () => goView("incidents");
 
 /* ================================================================ video */
 const video = $("video");
@@ -392,8 +387,6 @@ function renderLive() {
   renderChips();
   renderVehicle();
   renderHeroMotors();
-  renderIncBadge();
-  renderIncSwitch();
   renderTest();
   renderDiagSummary();
   if ($("diag").open) renderPanels();
@@ -1055,11 +1048,6 @@ function niceTicks(min, max, count = 4) {
 }
 function xTicks(src, width = 600) {
   const { t0, t1, clockAxis } = src, span = t1 - t0, out = [];
-  if (src.relAxis) {                       // seconds from an incident's trigger
-    const st = width < 520 ? 10 : 5;
-    for (let t = Math.ceil(t0 / st) * st; t <= t1; t += st) out.push({ t, label: t === 0 ? "0" : `${t > 0 ? "+" : "−"}${Math.abs(t)} s` });
-    return out;
-  }
   if (!clockAxis) {
     const step = span <= 60 ? 15 : span <= 300 ? 60 : 120;
     for (let back = 0; back <= span + 0.01; back += step) out.push({ t: t1 - back, label: back === 0 ? "now" : step < 60 ? `−${back}s` : `−${back / 60}m` });
@@ -2202,222 +2190,8 @@ document.addEventListener("keydown", (e) => {
 let resizeTimer = null;
 window.addEventListener("resize", () => {
   clearTimeout(resizeTimer);
-  resizeTimer = setTimeout(() => ({ live: liveCharts, history: historyCharts, incidents: incCharts, report: reportCharts, compare: compareCharts }[view] || []).forEach((c) => c.render()), 150);
+  resizeTimer = setTimeout(() => ({ live: liveCharts, history: historyCharts, report: reportCharts, compare: compareCharts }[view] || []).forEach((c) => c.render()), 150);
 });
-
-/* ================================================================ incidents (the black box) */
-/* An incident is ~30 s around one dangerous moment, kept with its camera frames
-   (app/incidents.py). The page: a list, and for one incident a frame player, the
-   facts at the trigger, what happened when, and its readings on charts that
-   scrub the player as you hover them. */
-let incidents = [], incSel = null, incCharts = [], incPlayer = null, incSeen = null;
-const INC_KIND = { high_risk: ["car", "Pull-over"], emergency_stop: ["stop", "Emergency stop"], link_lost: ["bt", "Link lost"], manual: ["flag", "Saved by hand"] };
-async function loadIncidents(open) {
-  let r;
-  try { r = await getJSON("/api/incidents"); }
-  catch (e) { $("inc-list").replaceChildren(el("div", "empty", "Incident recording is unavailable")); return; }
-  incidents = r.incidents;
-  incSeen = incidents.length ? incidents[0].id : null;
-  try { localStorage.setItem("dg-inc-seen", incSeen || ""); } catch (e) { /* private window */ }
-  renderIncBadge();
-  $("inc-keep").textContent = `newest ${r.keep} kept`;
-  renderIncidentList();
-  const want = open || incSel || (incidents[0] && incidents[0].id);
-  if (want && incidents.some((i) => i.id === want)) { if (want !== incSel || open) openIncident(want); }
-  else { incSel = null; $("inc-detail").replaceChildren(incEmpty(r.recording)); }
-}
-function incEmpty(recording) {
-  const c = el("div", "card empty-detail inc-empty");
-  c.append(icon(recording ? "camera" : "check", "i big"),
-    el("b", null, recording ? "Recording an incident now…" : "No incidents"),
-    el("p", null, recording ? "It appears here about 10 s after the moment that started it."
-      : "Nothing dangerous has happened since the black box was switched on. Incidents are kept even when their session is deleted."));
-  return c;
-}
-function renderIncidentList() {
-  const list = $("inc-list");
-  if (!incidents.length) { list.replaceChildren(el("div", "empty", "No incidents yet")); return; }
-  list.replaceChildren(...incidents.map((inc, i) => {
-    const b = el("button", "hist-item inc-item");
-    b.style.setProperty("--i", String(Math.min(i, 12)));
-    b.setAttribute("role", "option");
-    b.setAttribute("aria-selected", String(inc.id === incSel));
-    const first = inc.triggers[0] || {}, [ic] = INC_KIND[first.kind] || ["alert"];
-    const t1 = el("div", "t1"); t1.append(icon(ic, "i inc-ic"), el("span", null, incTitle(first)));
-    b.append(t1, el("div", "t2", `${dateLabel(inc.ts)}${inc.triggers.length > 1 ? `, ${inc.triggers.length} triggers` : ""}${inc.session_label ? ` — ${inc.session_label}` : ""}`));
-    b.onclick = () => { if (incSel !== inc.id) openIncident(inc.id); };
-    return b;
-  }));
-}
-const incTitle = (t) => String(t.title || "Incident").split(" - ")[0];
-function renderIncBadge() {
-  const s = state && state.incident, b = $("inc-badge");
-  let seen = incSeen;
-  if (seen == null) { try { seen = localStorage.getItem("dg-inc-seen"); } catch (e) { seen = null; } }
-  b.hidden = !(s && s.recording) && !(s && s.latest && s.latest !== seen);
-  b.classList.toggle("rec", !!(s && s.recording));
-}
-
-async function openIncident(id) {
-  incSel = id;
-  renderIncidentList();
-  if (location.hash !== `#incidents/${id}`) history.replaceState(null, "", `#incidents/${id}`);
-  let inc;
-  try { inc = await getJSON(`/api/incidents/${id}`); }
-  catch (e) { toast("Could not load the incident", true); return; }
-  if (incSel !== id) return;
-  if (incPlayer) incPlayer.pause();
-  const detail = $("inc-detail"), a = inc.at_trigger || {};
-  const first = inc.triggers[0] || {};
-
-  // header: what, when, and the two things you do with it
-  const head = el("div", "card inc-head");
-  const titles = el("div", "titles");
-  titles.append(el("h2", "inc-title", incTitle(first)),
-    el("div", "sub", `${new Date(inc.ts * 1000).toLocaleString([], { dateStyle: "full", timeStyle: "medium" })}${inc.session_label ? ` · ${inc.session_label}` : ""}`));
-  const acts = el("div", "inc-acts");
-  const dl = el("a", "btn primary"); dl.href = `/api/incidents/${id}.zip`; dl.append(icon("download"), el("span", null, "Download evidence (ZIP)"));
-  dl.title = "Camera frames, readings as CSV and a written summary";
-  const del = el("button", "danger"); del.append(icon("trash"), el("span", null, "Delete"));
-  del.onclick = async () => {
-    if (!(await dialog({ title: "Delete this incident?", body: "Its camera frames and readings will be removed permanently. Download the evidence first if anyone may need it.", confirm: "Delete", danger: true }))) return;
-    try { await api("DELETE", `/api/incidents/${id}`); toast("Incident deleted"); incSel = null; loadIncidents(); }
-    catch (e) { toast(`Delete failed: ${e.message}`, true); }
-  };
-  acts.append(dl, del);
-  head.append(titles, acts);
-
-  // the player
-  const pcard = el("div", "card inc-player-card");
-  incPlayer = incidentPlayer(pcard, inc);
-
-  // facts at the trigger
-  const facts = el("div", "card inc-facts");
-  facts.append(el("div", "card-h", null));
-  facts.firstChild.append(el("h2", null, "At the moment it started"));
-  const dl2 = el("dl", "inc-fl");
-  const yes = (b) => (b ? "Yes" : "No");
-  const fact = (k, v, tone) => { const d = el("div", tone ? `f ${tone}` : "f"); d.append(el("dt", null, k), el("dd", null, v)); dl2.append(d); };
-  fact("Risk", `${lv(a.risk).word}${a.case && a.case !== "NONE" ? ` — ${caseName(a.case)}` : ""}`, a.risk === "HIGH" ? "crit" : a.risk === "MEDIUM" ? "warn" : "");
-  fact("Driver", a.face_found ? "Face tracked" : a.driver === "DRIVER_ABSENT" ? "Absent" : "Face not seen", a.face_found ? "" : "warn");
-  fact("Eyes closed", a.eyes_closed ? `Yes${a.eyes_closed_s ? `, for ${fmt(a.eyes_closed_s, 1)} s` : ""}` : "No", a.eyes_closed ? "crit" : "");
-  fact("Phone in hand", yes(a.phone), a.phone ? "warn" : "");
-  fact("Seatbelt", a.seatbelt === "ON" ? "On" : a.seatbelt === "OFF" ? "Off" : "Unknown", a.seatbelt === "OFF" ? "crit" : "");
-  fact("Motors", a.left_pwm == null ? "No data" : `${a.left_pwm} / ${a.right_pwm} PWM`);
-  fact("Front distance", a.front_cm == null ? (a.left_pwm == null ? "No data" : "Clear") : `${fmt(a.front_cm, 0)} cm`, a.front_cm != null && a.front_cm <= 10 ? "crit" : "");
-  fact("Emergency stop", a.estop ? (a.estop === "obstacle" ? "Obstacle" : "Edge") : "No", a.estop ? "crit" : "");
-  facts.append(dl2);
-
-  // what happened, in order
-  const tl = el("div", "card inc-steps");
-  tl.append(el("div", "card-h", null)); tl.firstChild.append(el("h2", null, "What happened"));
-  const ol = el("ol", "inc-ol");
-  inc.triggers.forEach((t) => {
-    const li = el("li"); const [ic] = INC_KIND[t.kind] || ["alert"];
-    const go = el("button", "inc-step"); go.append(el("span", "when", t.offset_s ? `+${fmt(t.offset_s, 1)} s` : "0 s"), icon(ic),
-      el("span", null, t.repeats ? `${t.title} — and ${t.repeats} more time${t.repeats === 1 ? "" : "s"}` : t.title));
-    go.onclick = () => incPlayer.seek(t.offset_s, true);
-    li.append(go); ol.append(li);
-  });
-  tl.append(ol);
-
-  // readings
-  const rows = (inc.samples || []).map((r) => ({ ...r, t: r.offset_s }));
-  const t0 = -inc.pre_s, t1 = inc.duration_s - inc.pre_s;
-  const markers = inc.triggers.map((t) => ({ t: t.offset_s, title: t.title }));
-  const src = () => ({ rows, t0, t1, gap: 1, step: 0.2, relAxis: true, markers, label: "the incident" });
-  const grid = el("div", "detail-charts");
-  const cRisk = el("div", "card wide"), cLanes = el("div", "card wide"), cMot = el("div", "card wide"), cEar = el("div", "card"), cHead = el("div", "card");
-  grid.append(cRisk, cLanes, cMot, cEar, cHead);
-  const group = syncGroup();
-  group.add({ showT: (t) => incPlayer.seek(t), clearT() {} });       // hovering a chart scrubs the camera
-  incCharts = [riskChart(cRisk, src, { group }), lanesChart(cLanes, src, { group }),
-    lineChart(cMot, MOTOR_CFG, withMotors(src), { group }), lineChart(cEar, EAR_CFG, src, { group }), lineChart(cHead, HEAD_CFG, src, { group })];
-  incPlayer.onTime = (t) => incCharts.forEach((c) => c.showT && c.showT(t));
-
-  const side = el("div", "inc-side"); side.append(facts, tl);
-  const top = el("div", "inc-main"); top.append(pcard, side);
-  detail.replaceChildren(head, top, grid);
-  incCharts.forEach((c) => c.render());
-  incPlayer.seek(0);
-}
-
-/* The camera frames as a player: play/pause, scrub, jump to the trigger, half speed. */
-function incidentPlayer(card, inc) {
-  const times = inc.frames || [], n = times.length;
-  const stage = el("div", "inc-stage"), img = el("img"); img.alt = "Camera frame from the incident";
-  const badge = el("div", "inc-time"), live = el("div", "inc-flag");
-  stage.append(img, badge, live);
-  const bar = el("div", "inc-bar");
-  const play = el("button", "icon-btn inc-play"); play.setAttribute("aria-label", "Play");
-  const range = el("input"); range.type = "range"; range.min = "0"; range.max = String(Math.max(0, n - 1)); range.step = "1";
-  range.setAttribute("aria-label", "Position in the incident");
-  const track = el("div", "inc-track"); track.append(range);
-  const span = Math.max(0.1, (times[n - 1] || 0) - (times[0] || 0));
-  inc.triggers.forEach((t) => { const m = el("i", "inc-tick"); m.style.left = `${(((t.offset_s - (times[0] || 0)) / span) * 100).toFixed(2)}%`; m.title = t.title; track.append(m); });
-  const toTrig = el("button", "inc-jump"); toTrig.append(icon("flag"), el("span", null, "Trigger"));
-  const speed = el("button", "inc-speed", "1×"); speed.setAttribute("aria-label", "Playback speed");
-  bar.append(play, track, toTrig, speed);
-  card.append(stage, bar);
-  if (!n) { stage.replaceChildren(el("div", "empty", "No camera frames were saved for this incident")); return { seek() {}, pause() {}, onTime: null }; }
-
-  // frames never change: preload them all so scrubbing is instant
-  const urls = times.map((_, i) => `/api/incidents/${inc.id}/${i}.jpg`);
-  urls.forEach((u) => { const p = new Image(); p.src = u; });
-  let i = 0, timer = null, rate = 1;
-  const self = { onTime: null };
-  const nearest = (t) => { let best = 0; for (let k = 0; k < n; k++) if (Math.abs(times[k] - t) < Math.abs(times[best] - t)) best = k; return best; };
-  function show(k, fromUser) {
-    i = Math.max(0, Math.min(n - 1, k));
-    img.src = urls[i];
-    range.value = String(i);
-    const t = times[i];
-    badge.textContent = `${t >= 0 ? "+" : "−"}${fmt(Math.abs(t), 1)} s  ·  ${clock(inc.ts + t)}`;
-    const hit = inc.triggers.find((x) => Math.abs(x.offset_s - t) < 0.6);
-    live.textContent = hit ? hit.title : t < 0 ? "Before" : "After";
-    live.className = `inc-flag${hit ? " on" : ""}`;
-    if (fromUser && self.onTime) self.onTime(t);
-  }
-  function step() {
-    if (i >= n - 1) { self.pause(); return; }
-    const dt = (times[i + 1] - times[i]) * 1000 / rate;
-    show(i + 1, true);
-    timer = setTimeout(step, Math.max(40, dt));
-  }
-  self.play = () => { if (timer) return; if (i >= n - 1) show(0); play.classList.add("on"); play.replaceChildren(icon("pause")); play.setAttribute("aria-label", "Pause"); step(); };
-  self.pause = () => { clearTimeout(timer); timer = null; play.classList.remove("on"); play.replaceChildren(icon("play")); play.setAttribute("aria-label", "Play"); };
-  self.seek = (t, fromUser) => show(nearest(t), fromUser);
-  play.replaceChildren(icon("play"));
-  play.onclick = () => (timer ? self.pause() : self.play());
-  range.oninput = () => { self.pause(); show(Number(range.value), true); };
-  toTrig.onclick = () => { self.pause(); show(nearest(0), true); };
-  speed.onclick = () => { rate = rate === 1 ? 0.5 : rate === 0.5 ? 0.25 : 1; speed.textContent = rate === 1 ? "1×" : rate === 0.5 ? "½×" : "¼×"; };
-  stage.onclick = () => play.click();
-  return self;
-}
-/* The black box switch: on by default; off stops keeping the camera at all. */
-function renderIncSwitch() {
-  const s = state && state.incident;
-  if (!s) return;
-  const on = s.active !== false, sw = $("inc-switch");
-  sw.setAttribute("aria-checked", String(on));
-  $("inc-switch-lbl").textContent = on ? "Black box on" : "Black box off";
-  $("inc-switch-note").hidden = on;
-  $("btn-save-inc").disabled = !on;
-  $("btn-save-inc").title = on ? "Keep the last 20 s and the next 10 s as an incident" : "Switch the black box on first";
-}
-$("inc-switch").onclick = async () => {
-  const on = $("inc-switch").getAttribute("aria-checked") === "true";
-  if (on && !(await dialog({ title: "Switch the black box off?", confirm: "Switch off", danger: true,
-    body: "Until you switch it back on, nothing is recorded around dangerous moments — not even an emergency stop. Saved incidents are kept." }))) return;
-  $("inc-switch").setAttribute("aria-checked", String(!on));        // move at once; the next state confirms it
-  try { await api("POST", "/api/control", { action: on ? "incidents_off" : "incidents_on" }); toast(on ? "Black box off" : "Black box on"); }
-  catch (e) { $("inc-switch").setAttribute("aria-checked", String(on)); toast(`Could not switch: ${e.message}`, true); }
-};
-$("btn-save-inc").onclick = async () => {
-  try { await api("POST", "/api/control", { action: "save_incident" }); toast("Saving: the last 20 s and the next 10 s"); }
-  catch (e) { toast(`Could not save: ${e.message}`, true); }
-};
 
 /* ================================================================ press feel */
 /* Buttons light up from the point you press (style.css: --px/--py + --glow) and, on
@@ -2429,7 +2203,7 @@ document.addEventListener("pointerdown", (e) => {
   const r = b.getBoundingClientRect();
   b.style.setProperty("--px", `${e.clientX - r.left}px`);
   b.style.setProperty("--py", `${e.clientY - r.top}px`);
-  if (canBuzz && b.matches(".primary, .danger, [role=tab], .seg button, .inc-play")) navigator.vibrate(8);
+  if (canBuzz && b.matches(".primary, .danger, [role=tab], .seg button")) navigator.vibrate(8);
 }, { passive: true });
 
 /* ================================================================ start */
@@ -2440,4 +2214,3 @@ setInterval(pollHistory, 1000);
 setInterval(pollEvents, 1000);
 setInterval(() => { if (state) renderHero(); setConnection(); }, 1000);
 setInterval(() => { if (view === "history") loadHistory(); }, 10000);
-setInterval(() => { if (view === "incidents") loadIncidents(); }, 10000);

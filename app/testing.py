@@ -157,7 +157,7 @@ class TestController:
         else:
             return "unknown test"
         self.kind, self.t0, self.phase_at = test, now, now
-        self._instr, self._key = "", None
+        self._instr = ""
         self._events.append(("test", "info", f"{self.title} started", self._params_text()))
         if self.phase == "ready":
             self._instruct("T_READY", "Get ready - follow the instructions", now)
@@ -186,7 +186,7 @@ class TestController:
         return f"{self.trials_n} trial{'s' if self.trials_n > 1 else ''}, object: {OBJECTS[self.obj]}"
 
     def _instruct(self, key, text, now):
-        self._instr, self._key = text, key
+        self._instr = text
         self._seq += 1
         if key:
             self._say(key, now)

@@ -24,9 +24,8 @@ MAX_EPISODES = 1000
 
 
 class SessionRecorder:
-    def __init__(self, store=None, blackbox=None):
+    def __init__(self, store=None):
         self.store = store
-        self.blackbox = blackbox        # incidents.py: the seconds around a dangerous moment
         self._lock = threading.Lock()
         self.session_id = None
         self.label = ""
@@ -102,12 +101,6 @@ class SessionRecorder:
                 "time_in": dict(self._time_in), "alerts": dict(self._alerts),
                 "recording": self.session_id is not None,
             }
-            if self.blackbox is not None:
-                bb_sample = {**self._sample(state, now), "t": now, "seatbelt": (state.get("objects") or {}).get("seatbelt"),
-                             **{k: ((state.get("links") or {}).get("vehicle") or {}).get(k) for k in ("front_cm", "rear_cm", "estop", "base_pwm")}}
-                for title in self.blackbox.update(state, bb_sample, now, self.session_id, self.label):
-                    self._append_event("detect", "critical", "Incident recorded", title)
-                state["incident"] = self.blackbox.status()
             self._state, self._state_at = state, now
 
             if now - self._last_sample >= config.WEB_HISTORY_INTERVAL_SEC:

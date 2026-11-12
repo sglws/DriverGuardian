@@ -60,7 +60,7 @@ DriverGuardian/
 │   ├── face_landmarker.task             # MediaPipe Tasks API - Face Mesh (committed, no setup needed)
 │   └── blaze_face_short_range.tflite    # MediaPipe Tasks API - presence detection (committed)
 ├── training/
-│   ├── train.py            # Phase 11: fine-tune YOLO
+│   ├── train.py            # Phase 11: train/fine-tune YOLO (Roboflow export in dataset/)
 │   ├── evaluate.py         # Phase 12: precision/recall/mAP50
 │   └── export.py           # Phase 15: Pi-optimized export (ONNX/NCNN)
 ├── outputs/                 # screenshots, demo captures

@@ -16,7 +16,6 @@ Run from the project root with:
 import csv
 import os
 import time
-from collections import deque
 
 # ---- Keep the rest of the Pi responsive while this app runs ----
 # Everything in this block must run BEFORE numpy/cv2/mediapipe/ncnn are
@@ -91,7 +90,6 @@ from app.alerts import AlertSystem
 from app.web_view import WebView
 from app.storage import SessionStore
 from app.session import SessionRecorder
-from app.incidents import BlackBox
 from app.testing import TestController
 from app.arduino import UnoLink
 
@@ -196,10 +194,9 @@ def main():
             store = SessionStore(config.SESSION_DB_PATH, keep=config.SESSION_HISTORY_KEEP)
         except Exception as e:
             print(f"[storage] session history unavailable: {e}")
-    blackbox = BlackBox()                    # incidents: the seconds around a dangerous moment
-    recorder = SessionRecorder(store, blackbox)
+    recorder = SessionRecorder(store)
     recorder.start()
-    web = WebView(recorder, store, blackbox)   # dashboard in a browser - see app/web_view.py
+    web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
     tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
     uno = UnoLink()                          # cabin air sensors on USB (alcohol check, smoke)
     fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno after 3 s of sleep
@@ -250,7 +247,7 @@ def main():
     last_console_log = 0.0
     last_csv_log = 0.0
     last_yolo_submit = 0.0
-    frame_count = 0
+    display_on = config.DISPLAY_ENABLED   # local preview window (off on the Pi: use the browser)
 
     # ---- Per-stage profiling (diagnostic: which stage actually owns the
     # frame budget). Accumulated and averaged over PROFILE_LOG_INTERVAL_SEC
@@ -261,12 +258,6 @@ def main():
                      "imshow": 0.0, "waitkey": 0.0}
     profile_frames = 0
     last_profile_log = 0.0
-    # Rolling baseline for the per-frame [STUTTER] outlier check below,
-    # plus per-window accumulators so outliers are summarised once per
-    # [PROFILE] rather than printed one line each.
-    frame_time_history = deque(maxlen=config.STUTTER_WINDOW_FRAMES)
-    stutter_count = 0
-    stutter_worst = None  # (frame_total, baseline, stage_str) of the worst so far
 
     # ---- Risk classification update rate (requirement: >= 0.2 Hz, i.e. a
     # new Low/Medium/High classification at least every 5 s). Measured on
@@ -289,7 +280,6 @@ def main():
     try:
         while True:
             t_loop_start = time.perf_counter()
-            frame_count += 1
             uno.poll(time.monotonic())   # never blocks
             # ---- Commands from the dashboard. Applied at the top of the loop
             # so they also work during calibration. ----
@@ -325,13 +315,6 @@ def main():
                             recalibrate_requested = True
                 elif action == "test_stop":
                     tests.stop(time.monotonic())
-                elif action == "save_incident":
-                    blackbox.save_now("Saved from the dashboard")
-                elif action in ("incidents_on", "incidents_off"):
-                    blackbox.set_active(action == "incidents_on")
-                    recorder.log("system", "info" if action == "incidents_on" else "warning",
-                                 "Black box on" if action == "incidents_on" else "Black box off",
-                                 "incidents are recorded" if action == "incidents_on" else "no incidents are recorded until it is switched back on")
                 elif action == "new_session":
                     tests.stop(time.monotonic(), "new session started")
                     sync_tests()
@@ -360,9 +343,6 @@ def main():
                 presence_hysteresis.reset()
                 obstruction_hysteresis.reset()
                 risk_engine.reset_pre_drive()
-            # The preview window only updates every DISPLAY_EVERY_N_FRAMES
-            # (waitKey() blocks on the compositor, ~24 ms measured on the Pi).
-            display_due = config.DISPLAY_ENABLED and frame_count % config.DISPLAY_EVERY_N_FRAMES == 0
             ret, frame = camera.read()
             if not ret:
                 print("Camera read failed - stopping.")
@@ -380,7 +360,7 @@ def main():
             # Overlays are only drawn on frames someone will actually see -
             # the local window and/or a browser watching the live view.
             stream_due = web.wants_frame(now)
-            show = display_due or stream_due
+            show = display_on or stream_due
 
             # Obstruction/brightness are measured on the RAW frame first -
             # CLAHE enhancement below would artificially inflate the local
@@ -425,9 +405,8 @@ def main():
                 # window also draws its text onto this frame.)
                 if show and face_found:
                     face_mesh.draw(frame, drawable)
-                blackbox.add_frame(frame, now)
                 if stream_due:
-                    web.publish(frame.copy() if display_due else frame, now)
+                    web.publish(frame.copy() if display_on else frame, now)
                 if face_found:
                     if calibration_start is None:
                         calibration_start = now
@@ -436,7 +415,7 @@ def main():
                     calib_pitch.append(pitch)
                     calib_yaw.append(yaw)
                     elapsed = now - calibration_start
-                    if display_due:   # the dashboard shows its own calibration overlay
+                    if display_on:   # the dashboard shows its own calibration overlay
                         cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
                                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
@@ -455,7 +434,7 @@ def main():
                                     "pitch": baseline_pitch, "yaw": baseline_yaw}
                         print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
                               f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
-                elif display_due:
+                elif display_on:
                     cv2.putText(frame, "Waiting for face to calibrate...",
                                 (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
@@ -483,7 +462,7 @@ def main():
                         calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
                                         if calibration_start is not None else 0.0))), now)
 
-                if display_due:
+                if display_on:
                     cv2.imshow("DriverGuardian", frame)
                     if cv2.waitKey(1) & 0xFF == ord('q'):
                         break
@@ -555,11 +534,9 @@ def main():
                     cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
             # Dashboard frame: face dots + detection boxes, no status text (see
-            # the calibration branch above for why). The black box keeps a
-            # downscaled copy 5x a second (app/incidents.py).
-            blackbox.add_frame(frame, now)
+            # the calibration branch above for why).
             if stream_due:
-                web.publish(frame.copy() if display_due else frame, now)
+                web.publish(frame.copy() if display_on else frame, now)
 
             # seatbelt_supported: the pre-drive gate can only demand a
             # confirmed belt when the loaded model actually has that class -
@@ -630,13 +607,13 @@ def main():
 
             # ---- Live overlay (updates every frame) ----
             color = RISK_COLORS[risk]
-            if display_due:
+            if display_on:
                 cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
                             (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
 
             # The detailed text panel is only for the local window - the web
             # dashboard shows the same values as proper UI next to the video.
-            if display_due:
+            if display_on:
                 panel = [
                     f"Eyes: {'CLOSED' if drowsy_state['eye_closed'] else 'OPEN'}  "
                     f"EAR={smoothed_ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
@@ -688,7 +665,7 @@ def main():
             fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
             prev_time = curr_time
             fps_display = fps if not fps_display else 0.9 * fps_display + 0.1 * fps
-            if display_due:
+            if display_on:
                 cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
                 cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
@@ -721,41 +698,16 @@ def main():
                 log_file.flush()
 
             t_risk_draw = time.perf_counter()
-            if display_due:
-                # Preview-only downscale - see config.DISPLAY_SCALE.
-                # Everything downstream of detection already ran on the
-                # full-resolution frame, so this costs no accuracy; it
-                # only shrinks what the (software, no-OpenGL) Qt
-                # renderer has to blit inside waitKey() below.
-                if config.DISPLAY_SCALE != 1.0:
-                    preview = cv2.resize(frame, None, fx=config.DISPLAY_SCALE,
-                                         fy=config.DISPLAY_SCALE,
-                                         interpolation=cv2.INTER_NEAREST)
-                else:
-                    preview = frame
+            if config.DISPLAY_ENABLED:
+                # Preview-only downscale (config.DISPLAY_SCALE): detection already ran on
+                # the full-resolution frame, so this only shrinks what the GUI paints.
+                preview = frame if config.DISPLAY_SCALE == 1.0 else cv2.resize(
+                    frame, None, fx=config.DISPLAY_SCALE, fy=config.DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST)
                 cv2.imshow("DriverGuardian", preview)
-                # imshow() and waitKey() timed separately: the combined
-                # "display" stage was confirmed to spike to ~100ms roughly
-                # once a second (see [STUTTER]), but they fail for very
-                # different reasons - imshow() blocking points at frame
-                # data volume through this Qt build's software renderer (no
-                # OpenGL support), while waitKey() blocking points at the
-                # GUI event loop / compositor sync instead. waitKey() used
-                # to run on every frame even when nothing new was shown,
-                # which is why DISPLAY_EVERY_N_FRAMES alone changed nothing
-                # earlier - both now only run on shown frames.
-                t_imshow = time.perf_counter()
+                t_imshow = time.perf_counter()    # imshow only queues the repaint; waitKey does the blit
                 key = cv2.waitKey(1) & 0xFF
-            elif config.DISPLAY_ENABLED:
-                # Frame not shown: skip the GUI entirely. Key presses queue up
-                # in the window and are read on the next shown frame.
-                key = 0xFF
-                t_imshow = time.perf_counter()
             else:
-                # No window, no keyboard input possible - quit via Ctrl+C
-                # (already works, propagates as KeyboardInterrupt through
-                # the `finally` cleanup block below) and recalibration only
-                # happens once at startup, not re-triggerable mid-session.
+                # No window, so no keyboard: quit with Ctrl+C (it reaches the `finally` below).
                 key = 0xFF
                 t_imshow = time.perf_counter()
             t_display = time.perf_counter()
@@ -770,34 +722,6 @@ def main():
                 "imshow": t_imshow - t_risk_draw,
                 "waitkey": t_display - t_imshow,
             }
-            frame_total = sum(frame_stages.values())
-
-            # Per-frame outlier detector: [PROFILE] only reports 5-second
-            # averages, which can't show which single frame actually
-            # stalled or by how much - exactly the gap that made the
-            # earlier "flickering"/stutter report hard to pin down (YOLO's
-            # own average dropped to ~0ms after threading it, but the
-            # stutter itself was still reported as present). Compares each
-            # frame's total time against a rolling baseline of the last
-            # STUTTER_WINDOW_FRAMES frames (excluding itself) and flags
-            # anything that's a clear multiple of that baseline, with a
-            # per-stage breakdown for that exact frame - so instead of
-            # guessing candidates one at a time, this shows directly which
-            # stage caused the spike and how often it happens.
-            # Accumulated rather than printed per-occurrence: at one line
-            # per outlier this floods the console (and printing is itself
-            # slow enough to perturb the very timing being measured). One
-            # summary per [PROFILE] window is also strictly more useful -
-            # it gives the frequency, not just isolated events.
-            if len(frame_time_history) >= config.STUTTER_MIN_SAMPLES:
-                baseline = sum(frame_time_history) / len(frame_time_history)
-                if frame_total >= baseline * config.STUTTER_MULTIPLIER:
-                    stutter_count += 1
-                    if stutter_worst is None or frame_total > stutter_worst[0]:
-                        stage_str = " ".join(f"{k}={v * 1000:.1f}ms"
-                                              for k, v in frame_stages.items())
-                        stutter_worst = (frame_total, baseline, stage_str)
-            frame_time_history.append(frame_total)
 
             for _stage, _elapsed in frame_stages.items():
                 stage_totals[_stage] += _elapsed
@@ -811,14 +735,6 @@ def main():
                                       for k, v in stage_totals.items())
                 print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
                 last_stages = {k: round(v / profile_frames * 1000, 1) for k, v in stage_totals.items()}
-                if stutter_count:
-                    worst_total, worst_baseline, worst_stages = stutter_worst
-                    print(f"[STUTTER] {stutter_count} of {profile_frames} frames "
-                          f">{config.STUTTER_MULTIPLIER:g}x baseline | worst "
-                          f"{worst_total * 1000:.1f}ms vs ~{worst_baseline * 1000:.1f}ms "
-                          f"| {worst_stages}")
-                stutter_count = 0
-                stutter_worst = None
 
                 t_window = time.monotonic()
                 if risk_updates:
@@ -874,7 +790,6 @@ def main():
                 recalibrate_requested = True   # applied at the top of the next loop
 
     finally:
-        blackbox.close()
         recorder.end("app stopped")
         if store is not None:
             store.flush()
