@@ -1,31 +1,8 @@
-"""
-bt_latency_benchmark.py
------------------------
-Round-trip latency benchmark for the Pi <-> ESP32 Bluetooth SPP link,
-for report measurements.
+"""Round-trip latency of the Pi <-> ESP32 Bluetooth link (needs firmware/esp32/latency_echo).
 
-Pair it with the esp32/latency_echo/latency_echo.ino sketch (echoes each line straight back).
+    python tools/bt_latency_benchmark.py [--audio] [--label "wifi + speaker"]
 
-IMPORTANT - transport choice:
-  The app (app/alerts.py) talks to the ESP32 over a RAW
-  AF_BLUETOOTH/BTPROTO_RFCOMM socket to the MAC address - NOT via a
-  `rfcomm bind` /dev/rfcommX device file, which alerts.py's docstring notes
-  "has proven unreliable on some BlueZ versions". So `--transport socket`
-  (the default) is what reproduces production. `--transport serial` is kept
-  only for comparing the two paths.
-
-Stop the app first - the ESP32 accepts only one Bluetooth connection.
-
-Usage on the Pi:
-    python3 tools/bt_latency_benchmark.py                      # matches production
-    python3 tools/bt_latency_benchmark.py --audio --label "wifi + speaker playing"
-    python3 tools/bt_latency_benchmark.py --interval 0.05      # stress cadence
-    python3 tools/bt_latency_benchmark.py --transport serial --port /dev/rfcomm0
-
---audio keeps the default audio output (e.g. the Bluetooth speaker) playing
-for the whole run: the Pi's Bluetooth radio is shared between the speaker and
-the ESP32 link (and with Wi-Fi on the Pi's combo chip), so this is the
-realistic worst case. Requirement: round trip p99 <= 50 ms, max <= 100 ms.
+Writes every round trip to logs/ for tools/plot_latency.py.
 """
 
 import argparse
@@ -44,29 +21,23 @@ import statistics
 import sys
 import time
 
-DEFAULT_MAC = "08:B6:1F:3B:1A:AA"   # keep in sync with config.ESP32_MAC_ADDRESS
+DEFAULT_MAC = "08:B6:1F:3B:1A:AA"
 DEFAULT_RFCOMM_PORT = 1
 
 
 class SocketLink:
-    """Raw RFCOMM socket - the same transport app/alerts.py uses."""
+    """Raw RFCOMM socket - the same transport app/outputs/esp32_link.py uses."""
 
     def __init__(self, mac, channel, timeout):
         self.sock = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_STREAM,
                                   socket.BTPROTO_RFCOMM)
-        # No timeout during connect: a Classic Bluetooth RFCOMM handshake can
-        # legitimately take seconds, and a short timeout cuts it off mid-
-        # negotiation (surfaces as "[Errno 52] Invalid exchange"). Same
-        # reasoning as alerts.py.
         self.sock.connect((mac, channel))
         self._timeout = timeout
         self.sock.settimeout(timeout)
         self._buf = b""
 
     def drain(self):
-        """Discard anything still queued, so a late reply from a previous
-        iteration can't be misread as this iteration's reply. Without this,
-        a single timeout desyncs every subsequent sample."""
+        """Discard anything still queued, so a late reply from a previous iteration can't be misread as this iteration's reply."""
         self.sock.settimeout(0)
         try:
             while True:
@@ -83,7 +54,7 @@ class SocketLink:
         self.sock.settimeout(t)
 
     def write(self, data):
-        self.sock.sendall(data)      # sendall blocks until handed to the stack
+        self.sock.sendall(data)
 
     def readline(self):
         while b"\n" not in self._buf:
@@ -103,9 +74,9 @@ class SerialLink:
     """/dev/rfcommX device file - NOT what the app uses; for comparison only."""
 
     def __init__(self, port, baud, timeout):
-        import serial   # imported lazily so the socket path needs no pyserial
+        import serial
         self.ser = serial.Serial(port, baud, timeout=timeout)
-        time.sleep(2)   # let the link settle
+        time.sleep(2)
 
     def drain(self):
         self.ser.reset_input_buffer()
@@ -116,7 +87,7 @@ class SerialLink:
 
     def write(self, data):
         self.ser.write(data)
-        self.ser.flush()             # block until actually pushed out
+        self.ser.flush()
 
     def readline(self):
         return self.ser.readline()
@@ -132,8 +103,6 @@ def run(link, samples, warmup, interval, timeout):
     total = samples + warmup
 
     for i in range(total):
-        # Clear any stale reply BEFORE timing, so one bad iteration can't
-        # cascade into every following one.
         link.drain()
 
         payload = f"PING_{i}\n".encode("utf-8")
@@ -153,8 +122,6 @@ def run(link, samples, warmup, interval, timeout):
         elif response != expected:
             mismatched += 1
         elif i >= warmup:
-            # Warm-up samples are discarded: the first exchanges after a
-            # connection come up carry ramp-up cost and aren't representative.
             rtts.append((t1 - t0) * 1000.0)
 
         if interval:
@@ -164,8 +131,7 @@ def run(link, samples, warmup, interval, timeout):
 
 
 class AudioLoad:
-    """Keeps the default audio output playing (a loop of an alert prompt, or
-    a tone) for the duration of the benchmark."""
+    """Keeps the default audio output playing (a loop of an alert prompt, or a tone) for the duration of the benchmark."""
 
     def __init__(self):
         player = shutil.which("pw-play") or shutil.which("paplay") or shutil.which("aplay") or shutil.which("afplay")
@@ -201,8 +167,6 @@ def report(rtts, mismatched, timed_out, total, warmup, interval, transport, csv_
     rtts_sorted = sorted(rtts)
 
     def pct(p):
-        # Nearest-rank: unambiguous and stable for report figures, unlike
-        # interpolating quantiles on a skewed latency distribution.
         k = max(1, int(round(p / 100.0 * len(rtts_sorted))))
         return rtts_sorted[k - 1]
 

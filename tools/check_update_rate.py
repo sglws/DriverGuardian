@@ -1,22 +1,9 @@
-"""Verify the risk-classification update-rate requirement from a session log.
+"""Check the risk update-rate requirement (>= 12 Hz average, no gap over 1 s) from a log.
 
-Requirement: "The system shall ... compute a driver risk level with a
-classification update rate of at least 12 Hz on average, with no gap between
-updates exceeding 1 s (Low, Medium, High)."
-
-The gap limit means a new classification at least every 1 s. The worst
-case is what matters, so this checks the LONGEST gap between consecutive
-classifications, not just the average rate.
-
-Input is the per-classification log written by the app when
-config.RISK_UPDATE_LOG = True (logs/risk_updates_<session>.csv, columns
-t_monotonic, risk, case). With no argument the newest such log is used.
-
-Record a log (on the Pi):
-    DG_RISK_LOG=1 python -m app.main          # monitor/test, then quit
-Check it:
-    python tools/check_update_rate.py [path/to/risk_updates_*.csv] [--min-hz 1] [--min-avg-hz 12]
+    DG_RISK_LOG=1 python -m app.main     (monitor for a while, then quit)
+    python tools/check_update_rate.py    (reads the newest logs/risk_updates_*.csv)
 """
+
 import argparse
 import csv
 import glob
@@ -54,8 +41,6 @@ def main():
     if len(rows) < 2:
         sys.exit(f"{path}: need at least 2 classifications, found {len(rows)}.")
 
-    # Monitoring pauses (calibration, waiting for the seatbelt) are not gaps:
-    # the app numbers each continuous stretch of classifications as a segment.
     segments = {}
     for r in rows:
         segments.setdefault(r.get("segment") or "1", []).append(float(r["t_monotonic"]))

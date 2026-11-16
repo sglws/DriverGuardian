@@ -1,97 +1,60 @@
-"""
-main.py
--------
-DriverGuardian entry point. Wires together every module in the pipeline:
+"""DriverGuardian entry point: python -m app.main
 
-    Camera -> Face Mesh -> Eye Tracker -> Drowsiness Detector
-                        --> Head Pose Tracker
-    Camera -> YOLO Detector
-
-    Presence Detector ---+--> Risk Engine --> Alert System
-
-Run from the project root with:
-    python -m app.main
+One loop, one camera frame at a time:
+camera -> face landmarks -> eyes, mouth, head pose -> object detections and
+gas readings -> risk engine -> voice, ESP32, seat vibration -> dashboard.
 """
 
 import csv
 import os
 import time
 
-# ---- Keep the rest of the Pi responsive while this app runs ----
-# Everything in this block must run BEFORE numpy/cv2/mediapipe/ncnn are
-# imported: thread-pool sizes are read from the environment once at library
-# load, and CPU priority/affinity are inherited by every thread created
-# afterwards - so every library thread ends up covered, not just ours.
-#
-# 1. OpenMP (NCNN's YOLO threads) sleeps between inferences instead of
-#    busy-spinning on the CPU, and BLAS pools stay single-threaded.
+# Must run before numpy/cv2/mediapipe are imported: thread pools read these once.
 _APP_THREADS = str(max(1, (os.cpu_count() or 4) - 2))
 os.environ.setdefault("OMP_NUM_THREADS", _APP_THREADS)
 os.environ.setdefault("OMP_WAIT_POLICY", "PASSIVE")
 os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 os.environ.setdefault("MKL_NUM_THREADS", "1")
 
-from app import config  # noqa: E402  (config only imports os)
+from app import config  # noqa: E402
 
-# 2. Lower CPU priority. Pinning to fewer cores (below) still leaves this
-#    app competing on equal terms with the desktop compositor, audio
-#    (PipeWire, Bluetooth speaker) and bluetoothd on every core it uses -
-#    and memory bandwidth and heat are shared across all cores anyway. At a
-#    lower priority the kernel always serves those first; the app only
-#    loses time when the system genuinely needs it, so monitoring FPS is
-#    unaffected on an otherwise idle Pi.
-if config.APP_NICE and hasattr(os, "nice"):
-    try:
-        os.nice(config.APP_NICE)
-        print(f"[main] Running at lower CPU priority (nice +{config.APP_NICE}) "
-              f"so the desktop, audio and Bluetooth stay responsive")
-    except OSError as e:
-        print(f"[main] Could not lower CPU priority: {e}")
 
-# 3. Reserve one CPU core exclusively for the desktop compositor/window
-# manager, enforced at the OS scheduling level - not a request to any
-# individual library. Capping YOLO's own thread pool (torch/ncnn) helped
-# but didn't fully stop the screen freezing on the Pi, because MediaPipe's
-# TFLite delegate can't be thread-capped through its public Python API
-# (checked directly: BaseOptions only exposes a CPU/GPU delegate choice,
-# no num_threads) and runs on every single frame, not just every-Nth like
-# YOLO. CPU affinity sidesteps needing every library to cooperate: no
-# thread of this process, no matter which library spawned it, can ever be
-# scheduled onto a reserved core. No-ops on macOS/Windows
-# (sched_setaffinity is Linux-only) and on a machine with 2 or fewer
-# cores, where reserving one wouldn't leave enough for the app itself.
-if hasattr(os, "sched_setaffinity"):
-    _all_cpus = os.sched_getaffinity(0)
-    if len(_all_cpus) > 2:
-        _reserved_cpu = max(_all_cpus)
-        os.sched_setaffinity(0, _all_cpus - {_reserved_cpu})
-        print(f"[main] Reserved CPU core {_reserved_cpu} for the desktop session "
-              f"(app restricted to {sorted(_all_cpus - {_reserved_cpu})})")
+def _keep_pi_responsive():
+    """Lower priority and leave one CPU core to the desktop (Linux only)."""
+    if config.APP_NICE and hasattr(os, "nice"):
+        try:
+            os.nice(config.APP_NICE)
+        except OSError as e:
+            print(f"[main] could not lower CPU priority: {e}")
+    if hasattr(os, "sched_setaffinity"):
+        cpus = os.sched_getaffinity(0)
+        if len(cpus) > 2:
+            os.sched_setaffinity(0, cpus - {max(cpus)})
+
+
+_keep_pi_responsive()
 
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-# OpenCV's own worker pool: the per-frame colour conversions/CLAHE are
-# small, and a pool the size of the whole CPU just adds wake-ups and
-# contention with MediaPipe and YOLO for no real speed-up.
 cv2.setNumThreads(2)
 
 from app import utils  # noqa: E402
-from app.camera import Camera
-from app.face_detector import PresenceDetector
-from app.face_mesh import FaceMeshWrapper
-from app.eye_tracker import EyeTracker
-from app.mouth_tracker import MouthTracker
-from app.drowsiness import DrowsinessDetector
-from app.head_pose import estimate_pose, HeadPoseTracker
-from app.yolo_detector import YoloProcess
-from app.risk_engine import RiskEngine, Risk, PresenceState
-from app.alerts import AlertSystem
-from app.web_view import WebView
-from app.storage import SessionStore
-from app.session import SessionRecorder
-from app.testing import TestController
-from app.arduino import UnoLink
+from app.dashboard.session import SessionRecorder  # noqa: E402
+from app.dashboard.storage import SessionStore  # noqa: E402
+from app.dashboard.testing import TestController  # noqa: E402
+from app.dashboard.web_view import WebView  # noqa: E402
+from app.outputs.alerts import AlertSystem  # noqa: E402
+from app.outputs.arduino import UnoLink  # noqa: E402
+from app.risk.risk_engine import PresenceState, Risk, RiskEngine  # noqa: E402
+from app.vision.camera import Camera  # noqa: E402
+from app.vision.drowsiness import DrowsinessDetector  # noqa: E402
+from app.vision.eye_tracker import EyeTracker  # noqa: E402
+from app.vision.face_detector import PresenceDetector  # noqa: E402
+from app.vision.face_mesh import FaceMeshWrapper  # noqa: E402
+from app.vision.head_pose import HeadPoseTracker, estimate_pose  # noqa: E402
+from app.vision.mouth_tracker import MouthTracker  # noqa: E402
+from app.vision.yolo_detector import YoloProcess  # noqa: E402
 
 RISK_COLORS = {
     Risk.WAITING: (200, 200, 200),
@@ -100,18 +63,20 @@ RISK_COLORS = {
     Risk.MEDIUM: (0, 165, 255),
     Risk.HIGH: (0, 0, 255),
 }
+STAGES = ("camera", "preprocess", "mediapipe", "presence_logic", "yolo", "risk_draw", "imshow", "waitkey")
 
 
 def _r(x, nd=3):
     return None if x is None else round(float(x), nd)
 
 
+# ---------------------------------------------------------------- dashboard state
+
 def dashboard_state(*, risk, debug, messages, presence, face_found, drowsy_state, drowsiness,
                     ear, mar, pose_state, yolo_state, yolo, std_dev, brightness,
                     perf, thermal, sysinfo, links, baseline, calibrating=False, calib_progress=None,
                     paused=False):
-    """Everything the web dashboard shows, as plain JSON-able values."""
-    seatbelt_off = yolo_state.get("seatbelt_off")
+    """Everything the web dashboard shows, as plain JSON values."""
     return {
         "risk": risk.name, "case": debug.get("case", "NONE"), "score": debug.get("score"),
         "messages": list(messages[:4]), "presence": presence.name if presence else None,
@@ -138,7 +103,7 @@ def dashboard_state(*, risk, debug, messages, presence, face_found, drowsy_state
         "objects": {
             "phone": yolo_state.get("phone"), "consumption": yolo_state.get("consumption"),
             "cigarette": yolo_state.get("cigarette"),
-            "seatbelt": utils.seatbelt_label(seatbelt_off) if yolo.using_finetuned else "N/A",
+            "seatbelt": utils.seatbelt_label(yolo_state.get("seatbelt_off")) if yolo.available else "N/A",
             "boxes": [{"label": b[4], "conf": _r(b[5], 2), "counted": b[6]} for b in yolo_state.get("raw_boxes", [])],
         },
         "camera": {"brightness": _r(brightness, 0), "std_dev": _r(std_dev, 1),
@@ -155,27 +120,164 @@ def dashboard_state(*, risk, debug, messages, presence, face_found, drowsy_state
     }
 
 
-def setup_csv_logger():
-    os.makedirs(config.LOGS_DIR, exist_ok=True)
-    path = os.path.join(config.LOGS_DIR, f"session_{time.strftime('%Y%m%d_%H%M%S')}.csv")
-    f = open(path, "w", newline="")
-    writer = csv.writer(f)
-    writer.writerow(["timestamp", "risk", "case", "score", "eye_closed", "closed_elapsed",
-                      "blink_rate", "mouth_open", "total_yawns", "pitch_delta", "yaw_delta",
-                      "phone", "consumption", "seatbelt_off", "messages"])
-    return f, writer, path
+# ---------------------------------------------------------------- performance stats
 
+class Stats:
+    """Per-stage timing, risk update rate and system health, printed every
+    PROFILE_LOG_INTERVAL_SEC and shown on the dashboard."""
+
+    def __init__(self):
+        self.max_gap = 1.0 / config.RISK_UPDATE_MIN_HZ
+        self.fps = 0.0
+        self.stages_ms, self.rate_hz, self.gap_window_ms = {}, None, None
+        self.thermal = self.sysinfo = None
+        self.updates_session, self.gap_session = 0, 0.0
+        self._totals = dict.fromkeys(STAGES, 0.0)
+        self._frames = 0
+        self._last_print = 0.0
+        self._prev_frame = time.monotonic()
+        self._last_class = None
+        self._segment = 0
+        self.restart_window()
+        self._risk_log = self._risk_writer = None
+        if config.RISK_UPDATE_LOG:
+            os.makedirs(config.LOGS_DIR, exist_ok=True)
+            path = os.path.join(config.LOGS_DIR, f"risk_updates_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+            self._risk_log = open(path, "w", newline="")
+            self._risk_writer = csv.writer(self._risk_log)
+            self._risk_writer.writerow(["t_monotonic", "risk", "case", "segment"])
+            print(f"Logging every risk classification to: {path}")
+
+    def restart_window(self):
+        self._updates, self._window_start, self._gap_window = 0, time.monotonic(), 0.0
+
+    def new_session(self):
+        self.updates_session, self.gap_session = 0, 0.0
+
+    def not_classifying(self):
+        self._last_class = None
+
+    def classified(self, risk, case):
+        t = time.monotonic()
+        if self._last_class is None:
+            self._segment += 1
+        else:
+            gap = t - self._last_class
+            self._gap_window = max(self._gap_window, gap)
+            self.gap_session = max(self.gap_session, gap)
+        self._last_class = t
+        self._updates += 1
+        self.updates_session += 1
+        if self._risk_writer is not None:
+            self._risk_writer.writerow([f"{t:.6f}", risk.name, case, self._segment])
+
+    def perf(self):
+        return {"fps": _r(self.fps, 1), "stages_ms": self.stages_ms, "rate_hz": self.rate_hz,
+                "gap_window_ms": self.gap_window_ms, "gap_session_ms": _r(self.gap_session * 1000, 0),
+                "updates_total": self.updates_session, "camera_fps": config.CAMERA_FPS}
+
+    def frame_done(self, stage_times, now):
+        t = time.monotonic()
+        if t != self._prev_frame:
+            fps = 1.0 / (t - self._prev_frame)
+            self.fps = fps if not self.fps else 0.9 * self.fps + 0.1 * fps
+        self._prev_frame = t
+        for stage, seconds in zip(STAGES, np.diff(stage_times)):
+            self._totals[stage] += seconds
+        self._frames += 1
+        if now - self._last_print >= config.PROFILE_LOG_INTERVAL_SEC:
+            self._last_print = now
+            self._report()
+
+    def _report(self):
+        n = self._frames
+        total = sum(self._totals.values())
+        print(f"[PROFILE] avg_fps={n / total if total else 0:.1f} over {n} frames | "
+              + " ".join(f"{k}={v / n * 1000:.1f}ms" for k, v in self._totals.items()))
+        self.stages_ms = {k: round(v / n * 1000, 1) for k, v in self._totals.items()}
+        if self._updates:
+            rate = self._updates / (time.monotonic() - self._window_start)
+            self.rate_hz, self.gap_window_ms = round(rate, 1), round(self._gap_window * 1000)
+            verdict = "PASS" if self.gap_session <= self.max_gap else "FAIL"
+            print(f"[RISK-RATE] {rate:.1f} Hz | longest gap {self._gap_window * 1000:.0f} ms "
+                  f"| session longest {self.gap_session * 1000:.0f} ms: {verdict}")
+        self.restart_window()
+        self._totals = dict.fromkeys(STAGES, 0.0)
+        self._frames = 0
+
+        thermal = utils.check_pi_thermal_status()
+        self.thermal = thermal if thermal["available"] else None
+        if self.thermal:
+            flags = ", ".join(thermal["flags"]) or "no throttling"
+            print(f"[THERMAL] {thermal['temp_c']:.1f} C, {flags}")
+        self.sysinfo = utils.system_status()
+        if self.sysinfo:
+            s = self.sysinfo
+            print(f"[SYSTEM] load={s['load1']:.2f} mem_available={s['mem_available_mb']:.0f}MB "
+                  f"swap_used={s['swap_used_mb']:.0f}MB app_rss={s['rss_mb']:.0f}MB threads={s['threads']}")
+
+    def close(self):
+        if self._risk_log is not None:
+            self._risk_log.close()
+
+
+# ---------------------------------------------------------------- local preview window
+
+def draw_boxes(frame, boxes):
+    """Green = the box counted towards a detection, yellow = seen but not counted."""
+    for x1, y1, x2, y2, label, conf, counted in boxes:
+        color = (0, 255, 0) if counted else (255, 255, 0)
+        cv2.rectangle(frame, (int(x1), int(y1)), (int(x2), int(y2)), color, 2)
+        cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (int(x1), max(int(y1) - 8, 12)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+
+
+def draw_panel(frame, *, risk, debug, messages, presence, drowsy, drowsiness, pose, yolo_state,
+               ear, mar, std_dev, brightness, fps):
+    """Status text for the local window (the dashboard shows the same values)."""
+    h, w = frame.shape[:2]
+    color = RISK_COLORS[risk]
+    cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
+    boxes = ", ".join(f"{lbl}:{conf:.2f}{'*' if c else ''}" for *_, lbl, conf, c in yolo_state["raw_boxes"])
+    lines = [
+        f"Eyes: {'CLOSED' if drowsy['eye_closed'] else 'OPEN'}  EAR={ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
+        f"closed {drowsy['closed_elapsed']:.1f}s  level={drowsy['level'].name}",
+        f"Head pitch: {pose['pitch_label']}  d={pose['pitch_delta']:+.1f}  lean {pose['lean_elapsed']:.1f}s",
+        f"Head yaw: {pose['yaw_label']} ({pose['yaw_zone']})  d={pose['yaw_delta']:+.1f}  turn {pose['turn_elapsed']:.1f}s",
+        f"Blinks/{config.BLINK_WINDOW_SEC:.0f}s: {drowsy['blink_rate']}  Total: {drowsy['total_blinks']}",
+        f"Mouth: {'OPEN' if drowsy['mouth_open'] else 'CLOSED'}  MAR={mar:.2f} (thr>{drowsiness.open_mouth_threshold:.2f})  "
+        f"Yawns: {drowsy['total_yawns']}{'  [YAWNING]' if drowsy['is_yawning'] else ''}",
+        f"YOLO: phone={yolo_state['phone']} consumption={yolo_state['consumption']} "
+        f"cigarette={yolo_state['cigarette']} seatbelt={utils.seatbelt_label(yolo_state['seatbelt_off'])}",
+        "Raw boxes: " + (boxes or "(none)"),
+        f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
+    ]
+    y = 58
+    for line in lines:
+        cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
+        y += 19
+    y += 8
+    for m in messages[:4]:
+        cv2.putText(frame, m, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
+        y += 22
+    cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+    cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
+
+
+def show_window(frame):
+    """Shows the frame and returns the key pressed (0xFF = none)."""
+    if config.DISPLAY_SCALE != 1.0:
+        frame = cv2.resize(frame, None, fx=config.DISPLAY_SCALE, fy=config.DISPLAY_SCALE,
+                           interpolation=cv2.INTER_NEAREST)
+    cv2.imshow("DriverGuardian", frame)
+    return cv2.waitKey(1) & 0xFF
+
+
+# ---------------------------------------------------------------- main loop
 
 def main():
     print("Starting DriverGuardian...")
-
-    # Reverted WINDOW_NORMAL: scaling the frame to fill a resized/maximized
-    # window costs a real resize on every single imshow() call, which on
-    # the Pi's CPU was a steady per-frame tax contributing to the FPS drop.
-    # Back to imshow()'s default AUTOSIZE (1:1 blit, no scaling) - the
-    # window pins at the frame's native size instead of filling whatever
-    # size it's resized to.
-
     camera = Camera()
     presence_detector = PresenceDetector()
     face_mesh = FaceMeshWrapper()
@@ -183,11 +285,9 @@ def main():
     mouth_tracker = MouthTracker()
     drowsiness = DrowsinessDetector()
     head_pose_tracker = HeadPoseTracker()
-    yolo = YoloProcess()   # own process - see yolo_detector.YoloProcess
+    yolo = YoloProcess()
     risk_engine = RiskEngine()
     alerts = AlertSystem()
-    # Session history (app/storage.py) and the live session (app/session.py):
-    # recorded whether or not anyone has the dashboard open.
     store = None
     if config.SESSION_HISTORY_ENABLED:
         try:
@@ -196,16 +296,23 @@ def main():
             print(f"[storage] session history unavailable: {e}")
     recorder = SessionRecorder(store)
     recorder.start()
-    web = WebView(recorder, store)   # dashboard in a browser - see app/web_view.py
-    tests = TestController(say=alerts.say)   # requirement tests started from the dashboard
-    uno = UnoLink()                          # cabin air sensors on USB (alcohol check, smoke)
-    fan_last, fan_prev = -1e9, False         # pin-6 bursts on the Uno after 3 s of sleep
-    reported_test = None
+    web = WebView(recorder, store)
+    tests = TestController(say=alerts.say)
+    uno = UnoLink()
+    stats = Stats()
+
+    presence_hysteresis = utils.Hysteresis(config.NO_FACE_GRACE_SEC, config.PRESENCE_RECOVER_SEC)
+    obstruction_hysteresis = utils.Hysteresis(config.OBSTRUCTION_CONFIRM_SEC, config.OBSTRUCTION_RECOVER_SEC)
+    display_on = config.DISPLAY_ENABLED
     paused = False
     recalibrate_requested = False
+    reported_test = None
+    fan_last, fan_prev = -1e9, False
+    last_console_log = last_yolo_submit = 0.0
+    calibrating, calibration_start, calib_baseline = True, None, None
+    calib = {"ear": [], "mar": [], "pitch": [], "yaw": []}
 
     def sync_tests():
-        """Test events and finished results -> the session."""
         nonlocal reported_test
         for ev in tests.take_events():
             recorder.log(*ev)
@@ -213,76 +320,19 @@ def main():
             reported_test = tests.result
             recorder.add_test(tests.result)
 
-    # Symmetric debounce: presence loss needs NO_FACE_GRACE_SEC to escalate
-    # and PRESENCE_RECOVER_SEC of a confirmed face to clear. Obstruction
-    # (covered lens / hand / object in front of camera) is checked
-    # independently, with its own (shorter) confirm windows.
-    presence_hysteresis = utils.Hysteresis(config.NO_FACE_GRACE_SEC, config.PRESENCE_RECOVER_SEC)
-    obstruction_hysteresis = utils.Hysteresis(config.OBSTRUCTION_CONFIRM_SEC, config.OBSTRUCTION_RECOVER_SEC)
+    def links(now, yh=None):
+        yh = yh or yolo.health(now)
+        return {**alerts.health(now), "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1),
+                "uno": uno.status, "uno_note": uno.note}
 
-    log_file, csv_writer, log_path = setup_csv_logger()
-    print(f"Logging session to: {log_path}")
-
-    # Optional per-classification timestamp log (requirement evidence; see
-    # config.RISK_UPDATE_LOG and tools/check_update_rate.py).
-    risk_log_file = risk_log_writer = None
-    if config.RISK_UPDATE_LOG:
-        risk_log_path = log_path.replace("session_", "risk_updates_")
-        risk_log_file = open(risk_log_path, "w", newline="")
-        risk_log_writer = csv.writer(risk_log_file)
-        risk_log_writer.writerow(["t_monotonic", "risk", "case", "segment"])
-        print(f"Logging every risk classification to: {risk_log_path}")
-
-    # ---- Calibration state ----
-    calibrating = True
-    calibration_start = None
-    calib_ear, calib_mar, calib_pitch, calib_yaw = [], [], [], []
-
-    prev_time = time.monotonic()
-    fps_display = 0.0   # smoothed FPS for the dashboard
-    # Latest values from the [PROFILE] cadence, for the dashboard
-    last_stages, last_rate_hz, last_gap_window_ms = {}, None, None
-    last_thermal, last_sysinfo = None, None
-    calib_baseline = None   # calibrated values, for the dashboard
-    last_console_log = 0.0
-    last_csv_log = 0.0
-    last_yolo_submit = 0.0
-    display_on = config.DISPLAY_ENABLED   # local preview window (off on the Pi: use the browser)
-
-    # ---- Per-stage profiling (diagnostic: which stage actually owns the
-    # frame budget). Accumulated and averaged over PROFILE_LOG_INTERVAL_SEC
-    # rather than printed every frame - printing itself isn't free and
-    # would skew the very thing being measured.
-    stage_totals = {"camera": 0.0, "preprocess": 0.0, "mediapipe": 0.0,
-                     "presence_logic": 0.0, "yolo": 0.0, "risk_draw": 0.0,
-                     "imshow": 0.0, "waitkey": 0.0}
-    profile_frames = 0
-    last_profile_log = 0.0
-
-    # ---- Risk classification update rate (requirement: >= 0.2 Hz, i.e. a
-    # new Low/Medium/High classification at least every 5 s). Measured on
-    # time.monotonic() - the Pi's wall clock can jump when NTP syncs, which
-    # would fake a huge gap (or a negative one). WAITING (pre-drive /
-    # calibration) is not a risk classification, so the gap clock is reset
-    # there and only starts once real monitoring is running.
-    risk_max_gap = 1.0 / config.RISK_UPDATE_MIN_HZ
-    risk_updates = 0
-    risk_last_t = None
-    risk_window_start = time.monotonic()
-    risk_segment = 0   # increments each time classification (re)starts after WAITING
-    risk_updates_session = 0   # classifications this session (dashboard: average update rate)
-    risk_gap_window_max = 0.0
-    risk_gap_session_max = 0.0
-
-    print("Calibration will start once a face is detected.")
-    print("Sit normally, look straight at the camera, eyes open.")
+    print("Calibration starts once a face is detected: sit normally, look at the camera, eyes open.")
 
     try:
         while True:
-            t_loop_start = time.perf_counter()
-            uno.poll(time.monotonic())   # never blocks
-            # ---- Commands from the dashboard. Applied at the top of the loop
-            # so they also work during calibration. ----
+            t0 = time.perf_counter()
+            uno.poll(time.monotonic())
+
+            # ---- dashboard commands ----
             stop_requested = False
             for action, body in web.take_commands():
                 if action == "stop":
@@ -292,9 +342,8 @@ def main():
                     tests.stop(time.monotonic(), "monitoring paused")
                 elif action == "resume" and paused:
                     paused = False
-                    risk_updates, risk_window_start = 0, time.monotonic()
-                    # timers that kept running while paused must not fire on resume
-                    drowsiness.reset()
+                    stats.restart_window()
+                    drowsiness.reset()            # timers kept running while paused
                     head_pose_tracker.clear_lean_case()
                     presence_hysteresis.reset()
                     obstruction_hysteresis.reset()
@@ -310,9 +359,8 @@ def main():
                     else:
                         if paused:
                             paused = False
-                            risk_updates, risk_window_start = 0, time.monotonic()
-                        if tests.needs_calibration:
-                            recalibrate_requested = True
+                            stats.restart_window()
+                        recalibrate_requested = recalibrate_requested or tests.needs_calibration
                 elif action == "test_stop":
                     tests.stop(time.monotonic())
                 elif action == "new_session":
@@ -320,474 +368,193 @@ def main():
                     sync_tests()
                     recorder.end("new session started from the dashboard")
                     recorder.start(str(body.get("label") or ""))
-                    risk_gap_session_max = 0.0
-                    risk_updates_session = 0
+                    stats.new_session()
                     paused = False
                     recalibrate_requested = True
             if stop_requested:
                 tests.stop(time.monotonic(), "app stopped")
                 sync_tests()
-                print("[web] Stop requested from the dashboard - saving the session and exiting")
+                print("[web] stop requested from the dashboard")
                 break
             if recalibrate_requested:
                 recalibrate_requested = False
-                calibrating = True
-                calibration_start = None
-                calib_ear.clear()
-                calib_mar.clear()
-                calib_pitch.clear()
-                calib_yaw.clear()
+                calibrating, calibration_start = True, None
+                for values in calib.values():
+                    values.clear()
                 eye_tracker.reset()
                 mouth_tracker.reset()
                 drowsiness.reset()
                 presence_hysteresis.reset()
                 obstruction_hysteresis.reset()
                 risk_engine.reset_pre_drive()
+
+            # ---- camera and face ----
             ret, frame = camera.read()
             if not ret:
                 print("Camera read failed - stopping.")
                 break
             t_camera = time.perf_counter()
-
             h, w = frame.shape[:2]
-            # Monotonic, never wall-clock: every timer in the app (eye
-            # closure, head turn/lean, seatbelt, presence debounce) measures
-            # durations from this. The Pi's wall clock jumps when it syncs
-            # over the network after boot - hours forward on a Pi without a
-            # clock battery - which would make any timer running at that
-            # moment read "hours elapsed" and fire a false HIGH alert.
-            now = time.monotonic()
-            # Overlays are only drawn on frames someone will actually see -
-            # the local window and/or a browser watching the live view.
+            now = time.monotonic()   # never wall-clock: the Pi's clock jumps when it syncs
             stream_due = web.wants_frame(now)
             show = display_on or stream_due
 
-            # Obstruction/brightness are measured on the RAW frame first -
-            # CLAHE enhancement below would artificially inflate the local
-            # contrast of a covered lens and defeat the obstruction check.
-            # Measured on a 1/4-scale copy: mean/std-dev of a
-            # nearest-neighbour downsample match the full frame's, at ~1/16
-            # of the per-frame cost (np.std on the full 1280x720 frame
-            # converts ~0.9M pixels to float64 every frame).
+            # Brightness and the covered-lens check use the raw frame (CLAHE would hide a covered lens).
             gray = cv2.cvtColor(cv2.resize(frame, (w // 4, h // 4), interpolation=cv2.INTER_NEAREST),
                                 cv2.COLOR_BGR2GRAY)
             std_dev = utils.frame_std_dev(gray)
             brightness = utils.frame_mean_brightness(gray)
-            # NOTE: CLAHE-enhanced frames also get fed to YOLO (not just
-            # MediaPipe) - a prior attempt to hold back the raw frame from
-            # YOLO here (on the untested theory that CLAHE hurt it, since
-            # the model never saw enhanced images during training) turned
-            # out to measurably hurt phone detection in practice. Reverted:
-            # real-world results over an unproven theory.
             if brightness < config.LOW_LIGHT_BRIGHTNESS_THRESHOLD:
                 frame = utils.enhance_low_light(frame)
-
             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            t_preprocess = time.perf_counter()
+            t_pre = time.perf_counter()
 
-            landmarks, drawable = face_mesh.process(rgb_frame)
+            landmarks = face_mesh.process(rgb_frame)
             face_found = landmarks is not None
-
-            smoothed_ear, smoothed_mar, pitch, yaw = 0.30, 0.5, 0.0, 0.0
+            ear, mar, pitch, yaw = 0.30, 0.5, 0.0, 0.0
             if face_found:
-                smoothed_ear = eye_tracker.update(landmarks, w, h)
-                smoothed_mar = mouth_tracker.update(landmarks, w, h)
+                ear = eye_tracker.update(landmarks, w, h)
+                mar = mouth_tracker.update(landmarks, w, h)
                 p, y_, _ = estimate_pose(landmarks, w, h)
                 if p is not None:
                     pitch, yaw = p, y_
-            t_mediapipe = time.perf_counter()
+            t_mp = time.perf_counter()
 
-            # ---- Calibration phase ----
+            # ---- calibration: the driver's own baseline ----
             if calibrating:
-                # Hand the dashboard its frame here - face dots only, before
-                # any text: the status text is for the local window, the
-                # dashboard shows those values as UI. (A copy when the local
-                # window also draws its text onto this frame.)
                 if show and face_found:
-                    face_mesh.draw(frame, drawable)
+                    face_mesh.draw(frame, landmarks)
                 if stream_due:
                     web.publish(frame.copy() if display_on else frame, now)
                 if face_found:
-                    if calibration_start is None:
-                        calibration_start = now
-                    calib_ear.append(smoothed_ear)
-                    calib_mar.append(smoothed_mar)
-                    calib_pitch.append(pitch)
-                    calib_yaw.append(yaw)
+                    calibration_start = calibration_start or now
+                    for key, value in zip(calib, (ear, mar, pitch, yaw)):
+                        calib[key].append(value)
                     elapsed = now - calibration_start
-                    if display_on:   # the dashboard shows its own calibration overlay
-                        cv2.putText(frame, f"CALIBRATING... look straight ahead, mouth closed ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
+                    if display_on:
+                        cv2.putText(frame, f"CALIBRATING... look straight ahead ({elapsed:.1f}/{config.CALIBRATION_SEC:.0f}s)",
                                     (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 255), 2)
                     if elapsed >= config.CALIBRATION_SEC:
-                        baseline_ear = float(np.median(calib_ear))
-                        baseline_mar = float(np.median(calib_mar))
-                        baseline_pitch = float(np.median(calib_pitch))
-                        baseline_yaw = float(np.median(calib_yaw))
-                        drowsiness.set_baseline(baseline_ear)
-                        drowsiness.set_mouth_baseline(baseline_mar)
-                        head_pose_tracker.set_baseline(baseline_pitch, baseline_yaw)
+                        calib_baseline = {k: float(np.median(v)) for k, v in calib.items()}
+                        drowsiness.set_baseline(calib_baseline["ear"])
+                        drowsiness.set_mouth_baseline(calib_baseline["mar"])
+                        head_pose_tracker.set_baseline(calib_baseline["pitch"], calib_baseline["yaw"])
                         calibrating = False
-                        # the update-rate window restarts with monitoring, so
-                        # calibration time doesn't read as a slow update rate
-                        risk_updates, risk_window_start = 0, time.monotonic()
-                        calib_baseline = {"ear": baseline_ear, "mar": baseline_mar,
-                                    "pitch": baseline_pitch, "yaw": baseline_yaw}
-                        print(f"Calibration done. EAR={baseline_ear:.3f} MAR={baseline_mar:.3f} "
-                              f"pitch={baseline_pitch:.1f} yaw={baseline_yaw:.1f}")
+                        stats.restart_window()
+                        print("Calibration done: " + " ".join(f"{k}={v:.3f}" for k, v in calib_baseline.items()))
                 elif display_on:
-                    cv2.putText(frame, "Waiting for face to calibrate...",
-                                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    cv2.putText(frame, "Waiting for face to calibrate...", (10, 30),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-                # Keep the ESP32 fed during calibration too - it's the same
-                # "not monitoring yet" phase as the pre-drive check, and a
-                # silent Pi would trip the ESP32's link-loss watchdog into a
-                # full HIGH alarm (see Risk.WAITING).
-                alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")
-                risk_last_t = None  # not classifying yet - see risk-rate block
+                alerts.dispatch(Risk.WAITING, ["Calibrating"], "CALIBRATING")   # keeps the ESP32 link alive
+                stats.not_classifying()
                 if tests.active and not tests.needs_calibration:
                     tests.stop(now, "recalibration started")
                 sync_tests()
                 if recorder.wants_update(now):
-                    health = alerts.health(now)
+                    progress = min(1.0, (now - calibration_start) / config.CALIBRATION_SEC) if calibration_start else 0.0
                     recorder.update(dict(test=tests.status(now), cabin=uno.state(now), **dashboard_state(
                         risk=Risk.WAITING, debug={"case": "CALIBRATING"},
                         messages=["Calibrating - look straight at the camera"],
                         presence=None, face_found=face_found, drowsy_state=None, drowsiness=drowsiness,
-                        ear=smoothed_ear, mar=smoothed_mar, pose_state=None,
-                        yolo_state=yolo.get_latest(), yolo=yolo, std_dev=std_dev, brightness=brightness,
-                        perf={"fps": _r(fps_display, 1), "stages_ms": last_stages},
-                        thermal=last_thermal, sysinfo=last_sysinfo,
-                        links={**health, "yolo": yolo.health(now)["state"], "uno": uno.status, "uno_note": uno.note}, baseline=calib_baseline,
-                        calibrating=True, paused=paused,
-                        calib_progress=(min(1.0, (now - calibration_start) / config.CALIBRATION_SEC)
-                                        if calibration_start is not None else 0.0))), now)
-
-                if display_on:
-                    cv2.imshow("DriverGuardian", frame)
-                    if cv2.waitKey(1) & 0xFF == ord('q'):
-                        break
+                        ear=ear, mar=mar, pose_state=None, yolo_state=yolo.get_latest(), yolo=yolo,
+                        std_dev=std_dev, brightness=brightness,
+                        perf={"fps": _r(stats.fps, 1), "stages_ms": stats.stages_ms},
+                        thermal=stats.thermal, sysinfo=stats.sysinfo, links=links(now),
+                        baseline=calib_baseline, calibrating=True, paused=paused, calib_progress=progress)), now)
+                if display_on and show_window(frame) == ord("q"):
+                    break
                 continue
 
-            # ---- Presence classification (Phase 2 functional requirement) ----
-            # Obstruction (covered lens, or a hand/object held in front of the
-            # camera - both produce the same low-variance signature) and plain
-            # absence (driver out of seat / turned fully away) are each
-            # debounced symmetrically via Hysteresis: a single bad frame can't
-            # fire an instant autonomous-stop, and a single lucky good frame
-            # can't prematurely clear a real ongoing condition.
-            # presence_detector only matters when face_found is already
-            # False (see is_absent below - `and` short-circuits on it
-            # otherwise) - only actually run it then instead of eagerly
-            # every frame, since it's a full BlazeFace inference (~5.5ms)
-            # that's pure waste in the common case (driver present, main
-            # landmarker already found a face).
+            # ---- presence, covered camera, head and eyes ----
+            # BlazeFace only runs when the landmarker found no face (it is a second opinion).
             presence_face = presence_detector.detect(rgb_frame) if not face_found else False
-            is_obstructed = obstruction_hysteresis.update(std_dev < config.FRAME_STD_BLOCKED_THRESHOLD, now)
-            is_absent = presence_hysteresis.update(not face_found and not presence_face, now)
-
-            if is_obstructed:
+            if obstruction_hysteresis.update(std_dev < config.FRAME_STD_BLOCKED_THRESHOLD, now):
                 presence = PresenceState.CAMERA_BLOCKED
-            elif is_absent:
+            elif presence_hysteresis.update(not face_found and not presence_face, now):
                 presence = PresenceState.DRIVER_ABSENT
             else:
                 presence = PresenceState.DRIVER_PRESENT
+            pose = head_pose_tracker.update(pitch, yaw, now, face_found=face_found)
+            drowsy = drowsiness.update(ear, now, pose["pitch_delta"], mar, face_found=face_found)
+            t_presence = time.perf_counter()
 
-           # ---- Run detection pipelines ----
-            pose_state = head_pose_tracker.update(pitch, yaw, now, face_found=face_found)
-            drowsy_state = drowsiness.update(smoothed_ear, now, pose_state["pitch_delta"],
-                                             smoothed_mar, face_found=face_found)
-            t_presence_logic = time.perf_counter()
-
-            # YOLO gets the frame BEFORE anything is drawn on it - the face
-            # mesh dots used to be drawn first, so YOLO was looking at 478
-            # green dots painted over the face and mouth, exactly where it
-            # looks for phones, drinks and cigarettes.
+            # ---- objects (YOLO gets the frame before anything is drawn on it) ----
+            mouth_roi = (lambda: utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT)
+                         if face_found else None)
             if not tests.blocks_yolo and time.monotonic() - last_yolo_submit >= config.YOLO_INTERVAL_SEC:
-                roi = utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT) if face_found else None
-                if yolo.submit(frame, roi):
+                if yolo.submit(frame, mouth_roi()):
                     last_yolo_submit = time.monotonic()
             yolo_state = yolo.get_latest()
-            if tests.active:   # before anything is drawn: the delay test records these frames
-                tests.update(now, face_found=face_found, drowsy=drowsy_state, brightness=brightness,
-                             yolo_state=yolo_state, frame=frame, yolo=yolo,
-                             roi_fn=lambda: utils.mouth_roi(landmarks, w, h, config.MOUTH_PROXIMITY_RADIUS_MULT)
-                             if face_found else None)
+            if tests.active:
+                tests.update(now, face_found=face_found, drowsy=drowsy, brightness=brightness,
+                             yolo_state=yolo_state, frame=frame, yolo=yolo, roi_fn=mouth_roi)
                 sync_tests()
             if show and face_found:
-                face_mesh.draw(frame, drawable)
-            t_yolo = time.perf_counter()
-
-            # ---- Draw YOLO bounding boxes ----
-            # Green = this box cleared its confidence/mouth-proximity gate
-            # and actually fed a phone/drink/etc. flag below. Yellow = the
-            # model drew it, but it never counted for anything (too low
-            # confidence, or - for drink/food/cigarette - not near the
-            # mouth). Distinguishing these on-screen matters: a box that's
-            # merely visible is not the same as one that actually triggered
-            # a warning, and conflating them makes false-positive/negative
-            # reports hard to diagnose.
+                face_mesh.draw(frame, landmarks)
             if show:
-                for x1, y1, x2, y2, label, conf, counted in yolo_state["raw_boxes"]:
-                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                    box_color = (0, 255, 0) if counted else (255, 255, 0)
-                    cv2.rectangle(frame, (x1, y1), (x2, y2), box_color, 2)
-                    cv2.putText(frame, f"{label} {conf:.2f}{'*' if counted else ''}", (x1, max(y1 - 8, 12)),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.5, box_color, 2)
-            # Dashboard frame: face dots + detection boxes, no status text (see
-            # the calibration branch above for why).
+                draw_boxes(frame, yolo_state["raw_boxes"])
             if stream_due:
                 web.publish(frame.copy() if display_on else frame, now)
+            t_yolo = time.perf_counter()
 
-            # seatbelt_supported: the pre-drive gate can only demand a
-            # confirmed belt when the loaded model actually has that class -
-            # the COCO-pretrained fallback does not (see yolo_detector).
-            # cabin: the Uno's MQ-3 / MQ-2 readings - the alcohol check before
-            # the drive and the smoke half of smoking detection.
+            # ---- risk and outputs ----
             risk, messages, debug = risk_engine.evaluate(
-                now, presence, drowsy_state, pose_state, yolo_state,
-                seatbelt_supported=yolo.using_finetuned,
-                cabin=uno.state(now), uno_status=uno.status,
-            )
-            for level, title, detail in risk_engine.pop_events():   # alcohol test passed / failed
+                now, presence, drowsy, pose, yolo_state,
+                seatbelt_supported=yolo.available, cabin=uno.state(now), uno_status=uno.status)
+            for level, title, detail in risk_engine.pop_events():
                 recorder.log("system", level, title, detail)
             if paused:
-                # Paused from the dashboard: everything keeps running (video,
-                # detection) but nothing is classified or alerted; the ESP32
-                # gets WAITING, so the vehicle stays stopped.
                 risk, messages, debug = Risk.WAITING, ["Monitoring paused"], {"case": "PAUSED", "score": None}
             elif tests.active:
-                # A test from the dashboard: no alerts, the car stays stopped.
                 risk, messages, debug = Risk.WAITING, [tests.title], {"case": "TEST", "score": None}
-            alerts.dispatch(risk, messages, debug.get("case", "NONE"))
-            # Pin 6 on the Uno (seat vibration) once the driver is asleep with
-            # the eyes closed for ARDUINO_FAN_SLEEP_SEC, and again every
-            # ARDUINO_FAN_REPEAT_SEC while it lasts.
-            fan_case = (config.ARDUINO_FAN_SLEEP_SEC is not None and debug.get("case") == "SLEEP"
-                        and drowsy_state["closed_elapsed"] >= config.ARDUINO_FAN_SLEEP_SEC)
-            if fan_case and (not fan_prev or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC):
-                if uno.fan():
-                    fan_last = now
-                    recorder.log("system", "warning", "Fan burst",
-                                 f"Arduino pin 6 on for 3 s (eyes closed {drowsy_state['closed_elapsed']:.1f} s)")
-            fan_prev = fan_case
+            case = debug.get("case", "NONE")
+            alerts.dispatch(risk, messages, case)
+
+            sleeping = (config.ARDUINO_FAN_SLEEP_SEC is not None and case == "SLEEP"
+                        and drowsy["closed_elapsed"] >= config.ARDUINO_FAN_SLEEP_SEC)
+            if sleeping and (not fan_prev or now - fan_last >= config.ARDUINO_FAN_REPEAT_SEC) and uno.fan():
+                fan_last = now
+                recorder.log("system", "warning", "Fan burst",
+                             f"Arduino pin 6 on for 3 s (eyes closed {drowsy['closed_elapsed']:.1f} s)")
+            fan_prev = sleeping
+
+            if risk == Risk.WAITING:
+                stats.not_classifying()
+            else:
+                stats.classified(risk, case)
 
             if recorder.wants_update(now):
-                health = alerts.health(now)
                 yh = yolo.health(now)
                 recorder.update(dict(test=tests.status(now), cabin=uno.state(now), **dashboard_state(
                     risk=risk, debug=debug, messages=messages, presence=presence, face_found=face_found,
-                    drowsy_state=drowsy_state, drowsiness=drowsiness, ear=smoothed_ear, mar=smoothed_mar,
-                    pose_state=pose_state, yolo_state=yolo_state, yolo=yolo,
-                    std_dev=std_dev, brightness=brightness,
-                    perf={"fps": _r(fps_display, 1), "stages_ms": last_stages,
-                          "rate_hz": last_rate_hz, "gap_window_ms": last_gap_window_ms,
-                          "gap_session_ms": _r(risk_gap_session_max * 1000, 0),
-                          "updates_total": risk_updates_session,
-                          "camera_fps": config.CAMERA_FPS},
-                    thermal=last_thermal, sysinfo=last_sysinfo,
-                    links={**health, "yolo": yh["state"], "yolo_age": _r(yh["result_age"], 1), "uno": uno.status, "uno_note": uno.note},
-                    baseline=calib_baseline, paused=paused)), now)
+                    drowsy_state=drowsy, drowsiness=drowsiness, ear=ear, mar=mar,
+                    pose_state=pose, yolo_state=yolo_state, yolo=yolo, std_dev=std_dev, brightness=brightness,
+                    perf=stats.perf(), thermal=stats.thermal, sysinfo=stats.sysinfo,
+                    links=links(now, yh), baseline=calib_baseline, paused=paused)), now)
 
-            if risk == Risk.WAITING:
-                risk_last_t = None
-            else:
-                t_class = time.monotonic()
-                if risk_last_t is None:
-                    risk_segment += 1
-                if risk_last_t is not None:
-                    gap = t_class - risk_last_t
-                    risk_gap_window_max = max(risk_gap_window_max, gap)
-                    risk_gap_session_max = max(risk_gap_session_max, gap)
-                risk_last_t = t_class
-                risk_updates += 1
-                risk_updates_session += 1
-                if risk_log_writer is not None:
-                    risk_log_writer.writerow([f"{t_class:.6f}", risk.name,
-                                              debug.get("case", "NONE"), risk_segment])
-
-            # ---- Live overlay (updates every frame) ----
-            color = RISK_COLORS[risk]
-            if display_on:
-                cv2.putText(frame, f"RISK: {risk.name}  case={debug.get('case', 'NONE')}  (score={debug.get('score', '-')})",
-                            (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.9, color, 3)
-
-            # The detailed text panel is only for the local window - the web
-            # dashboard shows the same values as proper UI next to the video.
-            if display_on:
-                panel = [
-                    f"Eyes: {'CLOSED' if drowsy_state['eye_closed'] else 'OPEN'}  "
-                    f"EAR={smoothed_ear:.2f} (thr<{drowsiness.closed_threshold:.2f})  "
-                    f"closed {drowsy_state['closed_elapsed']:.1f}s  level={drowsy_state['level'].name}"
-                    f"{'  [looking down - EAR suppressed]' if drowsy_state['looking_down'] else ''}",
-
-                    f"Head pitch: {pose_state['pitch_label']}  d={pose_state['pitch_delta']:+.1f} deg  "
-                    f"lean {pose_state['lean_elapsed']:.1f}s",
-
-                    f"Head yaw: {pose_state['yaw_label']} ({pose_state['yaw_zone']})  d={pose_state['yaw_delta']:+.1f} deg  "
-                    f"turn {pose_state['turn_elapsed']:.1f}s  risk={pose_state['turn_risk']}",
-
-                    f"Blinks/{config.BLINK_WINDOW_SEC:.0f}s: {drowsy_state['blink_rate']}  "
-                    f"Total: {drowsy_state['total_blinks']}",
-
-                    f"Mouth: {'OPEN' if drowsy_state['mouth_open'] else 'CLOSED'}  "
-                    f"MAR={smoothed_mar:.2f} (thr>{drowsiness.open_mouth_threshold:.2f})  "
-                    f"open {drowsy_state['open_elapsed']:.1f}s  "
-                    f"Yawns/{config.YAWN_RATE_WINDOW_SEC:.0f}s: {drowsy_state['yawn_rate']}  "
-                    f"Total: {drowsy_state['total_yawns']}"
-                    f"{'  [YAWNING]' if drowsy_state['is_yawning'] else ''}",
-
-                    f"YOLO: phone={yolo_state['phone']} consumption={yolo_state['consumption']} "
-                    f"cigarette={yolo_state['cigarette']} "
-                    f"SEATBELT: {utils.seatbelt_label(yolo_state['seatbelt_off'])} "
-                    f"({'fine-tuned' if yolo.using_finetuned else 'pretrained' if yolo.available else 'disabled'})",
-
-                    # Raw model output (label:confidence, '*' = cleared its gate
-                    # and counted toward the flags above) - diagnostic visibility
-                    # into what the model actually sees, before K-of-N
-                    # confirmation is applied on top.
-                    "Raw boxes: " + (", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
-                                                for *_, lbl, conf, counted in yolo_state["raw_boxes"])
-                                      or "(none)"),
-
-                    f"Presence: {presence.name}  (std_dev={std_dev:.1f} brightness={brightness:.0f})",
-                ]
-                y = 58
-                for line in panel:
-                    cv2.putText(frame, line, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (255, 255, 255), 1)
-                    y += 19
-
-                y += 8
-                for m in messages[:4]:
-                    cv2.putText(frame, m, (10, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, color, 1)
-                    y += 22
-
-            curr_time = time.monotonic()
-            fps = 1.0 / (curr_time - prev_time) if curr_time != prev_time else 0.0
-            prev_time = curr_time
-            fps_display = fps if not fps_display else 0.9 * fps_display + 0.1 * fps
-            if display_on:
-                cv2.putText(frame, f"FPS: {fps:.1f}", (w - 120, 25),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                cv2.putText(frame, "q=quit  r=recalibrate", (w - 260, h - 15),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (200, 200, 200), 1)
-
-            # ---- Console live log ----
             if config.CONSOLE_LOG_ENABLED and now - last_console_log >= config.CONSOLE_LOG_INTERVAL_SEC:
                 last_console_log = now
-                print(f"[{utils.timestamp()}] RISK={risk.name:6s} case={debug.get('case', 'NONE'):16s} score={debug.get('score')} | "
-                      f"Eyes={'CLOSED' if drowsy_state['eye_closed'] else 'OPEN':6s} "
-                      f"EAR={smoothed_ear:.2f} | Pitch={pose_state['pitch_label']:8s} "
-                      f"d={pose_state['pitch_delta']:+5.1f} | Yaw={pose_state['yaw_label']:6s} "
-                      f"d={pose_state['yaw_delta']:+5.1f} | {' / '.join(messages[:2])}")
-                if yolo_state["raw_boxes"]:
-                    boxes_str = ", ".join(f"{lbl}:{conf:.2f}{'*' if counted else ''}"
-                                           for *_, lbl, conf, counted in yolo_state["raw_boxes"])
-                    print(f"    -> YOLO raw: {boxes_str}")
+                print(f"[{utils.timestamp()}] RISK={risk.name:6s} case={case:16s} score={debug.get('score')} | "
+                      f"Eyes={'CLOSED' if drowsy['eye_closed'] else 'OPEN':6s} EAR={ear:.2f} | "
+                      f"Pitch={pose['pitch_label']:8s} d={pose['pitch_delta']:+5.1f} | "
+                      f"Yaw={pose['yaw_label']:6s} d={pose['yaw_delta']:+5.1f} | {' / '.join(messages[:2])}")
 
-            # ---- CSV log ----
-            if now - last_csv_log >= config.CSV_LOG_INTERVAL_SEC:
-                last_csv_log = now
-                csv_writer.writerow([
-                    utils.timestamp(), risk.name, debug.get("case", "NONE"), debug.get("score"),
-                    drowsy_state["eye_closed"], f"{drowsy_state['closed_elapsed']:.2f}",
-                    drowsy_state["blink_rate"], drowsy_state["mouth_open"], drowsy_state["total_yawns"],
-                    f"{pose_state['pitch_delta']:.1f}",
-                    f"{pose_state['yaw_delta']:.1f}", yolo_state["phone"],
-                    yolo_state["consumption"], yolo_state["seatbelt_off"], " / ".join(messages),
-                ])
-                log_file.flush()
+            # ---- local window ----
+            t_risk = time.perf_counter()
+            key = 0xFF
+            if display_on:
+                draw_panel(frame, risk=risk, debug=debug, messages=messages, presence=presence, drowsy=drowsy,
+                           drowsiness=drowsiness, pose=pose, yolo_state=yolo_state, ear=ear, mar=mar,
+                           std_dev=std_dev, brightness=brightness, fps=stats.fps)
+                key = show_window(frame)
+            t_end = time.perf_counter()
+            stats.frame_done((t0, t_camera, t_pre, t_mp, t_presence, t_yolo, t_risk, t_end, t_end), now)
 
-            t_risk_draw = time.perf_counter()
-            if config.DISPLAY_ENABLED:
-                # Preview-only downscale (config.DISPLAY_SCALE): detection already ran on
-                # the full-resolution frame, so this only shrinks what the GUI paints.
-                preview = frame if config.DISPLAY_SCALE == 1.0 else cv2.resize(
-                    frame, None, fx=config.DISPLAY_SCALE, fy=config.DISPLAY_SCALE, interpolation=cv2.INTER_NEAREST)
-                cv2.imshow("DriverGuardian", preview)
-                t_imshow = time.perf_counter()    # imshow only queues the repaint; waitKey does the blit
-                key = cv2.waitKey(1) & 0xFF
-            else:
-                # No window, so no keyboard: quit with Ctrl+C (it reaches the `finally` below).
-                key = 0xFF
-                t_imshow = time.perf_counter()
-            t_display = time.perf_counter()
-
-            frame_stages = {
-                "camera": t_camera - t_loop_start,
-                "preprocess": t_preprocess - t_camera,
-                "mediapipe": t_mediapipe - t_preprocess,
-                "presence_logic": t_presence_logic - t_mediapipe,
-                "yolo": t_yolo - t_presence_logic,
-                "risk_draw": t_risk_draw - t_yolo,
-                "imshow": t_imshow - t_risk_draw,
-                "waitkey": t_display - t_imshow,
-            }
-
-            for _stage, _elapsed in frame_stages.items():
-                stage_totals[_stage] += _elapsed
-            profile_frames += 1
-
-            if now - last_profile_log >= config.PROFILE_LOG_INTERVAL_SEC and profile_frames > 0:
-                last_profile_log = now
-                total = sum(stage_totals.values())
-                avg_fps = profile_frames / total if total > 0 else 0.0
-                breakdown = " ".join(f"{k}={(v / profile_frames) * 1000:.1f}ms"
-                                      for k, v in stage_totals.items())
-                print(f"[PROFILE] avg_fps={avg_fps:.1f} over {profile_frames} frames | {breakdown}")
-                last_stages = {k: round(v / profile_frames * 1000, 1) for k, v in stage_totals.items()}
-
-                t_window = time.monotonic()
-                if risk_updates:
-                    rate = risk_updates / (t_window - risk_window_start)
-                    last_rate_hz, last_gap_window_ms = round(rate, 1), round(risk_gap_window_max * 1000)
-                    verdict = "PASS" if risk_gap_session_max <= risk_max_gap else "FAIL"
-                    print(f"[RISK-RATE] {rate:.1f} Hz over {risk_updates} classifications "
-                          f"| longest gap {risk_gap_window_max * 1000:.0f}ms "
-                          f"| session longest {risk_gap_session_max * 1000:.0f}ms "
-                          f"| req >= {config.RISK_UPDATE_MIN_HZ:g} Hz "
-                          f"(gap <= {risk_max_gap * 1000:.0f}ms): {verdict}")
-                else:
-                    print("[RISK-RATE] no classifications this window (waiting/calibrating)")
-                risk_updates = 0
-                risk_gap_window_max = 0.0
-                risk_window_start = t_window
-                stage_totals = {k: 0.0 for k in stage_totals}
-                profile_frames = 0
-
-                # Printed on the same cadence as [PROFILE] so a temp/
-                # throttle reading always lines up with the FPS numbers
-                # next to it - sudden intermittent drops are a classic
-                # symptom of thermal throttling or under-voltage, and no
-                # software fix elsewhere in this app can solve that.
-                thermal = utils.check_pi_thermal_status()
-                last_thermal = thermal if thermal["available"] else None
-                if thermal["available"]:
-                    if thermal["flags"]:
-                        print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  "
-                              f"THROTTLING DETECTED: {', '.join(thermal['flags'])} "
-                              f"- this needs a hardware fix (PSU/heatsink/fan), "
-                              f"not a software one")
-                    else:
-                        print(f"[THERMAL] temp={thermal['temp_c']:.1f}C  no throttling")
-
-                # Whole-system picture on the same cadence: if the desktop
-                # lags while FPS looks fine, this shows whether the Pi is
-                # out of CPU (load), out of RAM (swapping to the SD card
-                # stalls everything, not just this app) or leaking threads.
-                sysinfo = utils.system_status()
-                last_sysinfo = sysinfo
-                if sysinfo:
-                    print(f"[SYSTEM] load={sysinfo['load1']:.2f} (cores={sysinfo['cores']}) "
-                          f"mem_available={sysinfo['mem_available_mb']:.0f}MB "
-                          f"swap_used={sysinfo['swap_used_mb']:.0f}MB "
-                          f"app_rss={sysinfo['rss_mb']:.0f}MB threads={sysinfo['threads']}"
-                          + ("  <- SWAPPING: out of RAM, expect system-wide lag"
-                             if sysinfo["swap_used_mb"] > 50 else ""))
-
-            if key == ord('q'):
+            if key == ord("q"):
                 break
-            elif key == ord('r'):
-                recalibrate_requested = True   # applied at the top of the next loop
+            if key == ord("r"):
+                recalibrate_requested = True
 
     finally:
         recorder.end("app stopped")
@@ -795,7 +562,7 @@ def main():
             store.flush()
             store.close()
             print(f"Session saved to the history database: {config.SESSION_DB_PATH}")
-        alerts.close()  # stop any alert still being spoken
+        alerts.close()
         uno.close()
         web.close()
         camera.release()
@@ -803,10 +570,7 @@ def main():
         presence_detector.close()
         face_mesh.close()
         yolo.close()
-        log_file.close()
-        if risk_log_file is not None:
-            risk_log_file.close()
-        print(f"Session log saved: {log_path}")
+        stats.close()
 
 
 if __name__ == "__main__":

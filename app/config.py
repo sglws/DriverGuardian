@@ -1,536 +1,176 @@
-"""
-config.py
----------
-Single source of truth for all tunable parameters and file paths.
-Phase 1 deliverable: environment/config setup.
+"""Every setting and file path of the app.
+
+Any DG_* environment variable listed at the bottom overrides a setting for
+one run, e.g. DG_DISPLAY=0 python -m app.main
 """
 
 import os
 import sys
 
-# --------------------------------------------------------------------------
-# Paths
-# --------------------------------------------------------------------------
+# ---- Paths ----
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 LOGS_DIR = os.path.join(BASE_DIR, "logs")
+DATA_DIR = os.path.join(BASE_DIR, "data")
 
-YOLO_PRETRAINED_PATH = os.path.join(MODELS_DIR, "yolo11n.pt")   # Phase 8 (COCO pretrained)
-YOLO_FINETUNED_PATH = os.path.join(MODELS_DIR, "best.pt")        # Phase 11 (your custom classes)
-# Phase 15: same weights as best.pt, exported to NCNN (training/export.py
-# --format ncnn) for faster CPU inference on the Pi's ARM cores - identical
-# classes/accuracy, just a different backend. Preferred automatically when
-# present; falls back to best.pt untouched if this directory doesn't exist.
-# Re-export whenever best.pt OR YOLO_IMG_SIZE changes (this dir doesn't
-# auto-update, and a stale export crashes at inference time rather than
-# just running slow - the .param/.bin shape has to match exactly).
-YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_ncnn_model")
-
-# MediaPipe Tasks API models (Phases 2-3). Required since mediapipe 1.0.0
-# removed the old bundled-model mp.solutions API - these are downloaded once
-# from Google's official model bucket and committed to the repo (both are
-# a few MB, same as yolo11n.pt).
+YOLO_MODEL_PATH = os.path.join(MODELS_DIR, "best.pt")
+YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_ncnn_model")   # used when present; re-export after changing best.pt
 FACE_LANDMARKER_MODEL_PATH = os.path.join(MODELS_DIR, "face_landmarker.task")
 FACE_DETECTOR_MODEL_PATH = os.path.join(MODELS_DIR, "blaze_face_short_range.tflite")
-
-# --------------------------------------------------------------------------
-# Camera (Phase 1)
-# --------------------------------------------------------------------------
-# Which camera: "auto" = the Pi's CSI camera when picamera2 is installed,
-# otherwise a USB webcam; "csi" = always the CSI camera; "usb" = a USB webcam
-# even on the Pi (e.g. a Logitech, to compare with the IR camera). Override
-# for one run with DG_CAMERA=usb / csi / auto.
-CAMERA_SOURCE = "auto"
-# USB webcam number. On a Pi 5 the first /dev/videoN belong to the camera
-# hardware, so with CAMERA_SOURCE = "usb" the USB webcam is found by itself
-# on Linux and this is only used elsewhere (laptops: 0 = built-in camera).
-CAMERA_INDEX = 0
-FRAME_WIDTH = 1280
-FRAME_HEIGHT = 720
-TARGET_FPS_PREFERRED = 30   # USB webcams (they usually only offer 15/30)
-# Pi camera (picamera2) frame rate. The app is a 12+ Hz monitor; frames the
-# pipeline can't use were still captured and run through the ISP. 20 keeps
-# headroom above the requirement and leaves the rest of the CPU idle -
-# cooler Pi, smoother desktop. Raise it if the Pi has clear CPU headroom.
-CAMERA_FPS = 20
-# The Pi camera is a NoIR one (no infrared filter): with the normal colour
-# tuning, infrared light reaches the red pixels and the image turns pink/red.
-# True loads Raspberry Pi's NoIR tuning for the sensor instead (imx219 ->
-# imx219_noir.json), done by the ISP at no CPU cost. Override with DG_NOIR=0.
-CAMERA_NOIR = True
-CAMERA_SENSOR = "imx219"    # the Pi camera's sensor (rpicam-hello --list-cameras)
-# Grey image straight from the ISP (saturation 0, no CPU cost): under IR
-# light there is no real colour, so this removes any tint that is left.
-# YOLO was trained on colour images - compare detections before keeping it
-# on. Override with DG_GRAY=1.
-CAMERA_GRAYSCALE = False
-
-# When False: skips all drawing (face mesh dots, YOLO boxes, text panel)
-# and the cv2.imshow()/waitKey() window entirely - camera, MediaPipe,
-# YOLO, risk logic, and console/CSV logging all still run normally.
-# Originally scoped as a production/no-preview-needed deployment option;
-# currently doubling as a diagnostic toggle to isolate whether a reported
-# system-wide freeze (CPU and RAM both already ruled out) is coming from
-# the camera/ISP path or from cv2.imshow()/compositor rendering - if the
-# freeze still happens with this False, it's not about the display.
-# No 'r' recalibration key when False (see main.py); quit via Ctrl+C.
-# Local preview window: ON on a Mac/PC, OFF on the Pi (Linux). On the Pi,
-# watch the app in a browser instead (WEB_VIEW below) - over remote desktop
-# (Pi Connect / VNC) the constantly-changing camera window makes the whole
-# remote desktop lag, since the Pi 5 re-encodes its screen in software.
-# Override for one run: DG_DISPLAY=1 (e.g. a monitor plugged into the Pi)
-# or DG_DISPLAY=0.
-DISPLAY_ENABLED = not sys.platform.startswith("linux")
-# ---- Live view in a web browser (app/web_view.py) ----
-# Open http://<pi-hostname>.local:8080 on any device on the same network
-# (e.g. http://pi5.local:8080). Frames are only encoded while someone is
-# watching, so it costs nothing otherwise.
-WEB_VIEW_ENABLED = True
-# PIN for the dashboard's controls (pause, stop, new session, recalibrate,
-# markers, tests, renaming, deleting). Watching needs no PIN. Each browser
-# asks once and remembers it. Empty = no PIN. CHANGE IT before a demo.
-DASHBOARD_PIN = "1234"
-WEB_VIEW_HOST = "0.0.0.0"       # all network interfaces; "127.0.0.1" = this machine only
-WEB_VIEW_PORT = 8080
-WEB_VIEW_FPS = 10               # stream frame rate (detection still runs at full rate)
-WEB_VIEW_WIDTH = 1280           # stream width in pixels; 1280 = full camera resolution
-WEB_VIEW_JPEG_QUALITY = 80      # ~5 Mbit/s at 1280 px / 10 fps; lower both for a weak network
-WEB_STATUS_INTERVAL_SEC = 0.2   # how often the main loop hands the dashboard a fresh state
-WEB_HISTORY_INTERVAL_SEC = 0.25 # chart sample spacing (4 per second)
-WEB_HISTORY_SEC = 600           # chart history kept in memory (10 minutes)
-
-# ---- Session history (app/storage.py - SQLite, nothing to install) ----
-# Every monitoring session is saved (summary, events, 1 Hz timeline) and can
-# be reviewed, renamed, exported or deleted in the dashboard's History tab.
-# Only the newest SESSION_HISTORY_KEEP sessions are kept (~1-2 MB per hour).
-SESSION_HISTORY_ENABLED = True
-SESSION_HISTORY_KEEP = 20
-DATA_DIR = os.path.join(BASE_DIR, "data")
 SESSION_DB_PATH = os.path.join(DATA_DIR, "driverguardian.db")
 
-# CPU priority for the whole app (0 = normal, 19 = lowest). See main.py:
-# keeps the desktop, audio and Bluetooth responsive under full load.
-APP_NICE = 10
-# Scale factor for the local preview window only (1.0 = no resize); detection always runs on
-# the full frame. imshow() just queues the repaint and the software blit happens in waitKey()
-# (this Qt build has no OpenGL), so its cost follows the pixel count - but only on some
-# machines: on a Windows laptop 0.5 cut waitKey from 24.5 ms to 2.2 ms, on the Pi it changed
-# nothing. Hence 1.0 by default.
+# ---- Camera ----
+CAMERA_SOURCE = "auto"      # "auto" (Pi camera if available), "csi" or "usb"
+CAMERA_INDEX = 0            # USB webcam number on a laptop
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
+TARGET_FPS_PREFERRED = 30   # USB webcams
+CAMERA_FPS = 20             # Pi camera
+CAMERA_NOIR = True          # NoIR colour tuning, removes the infrared red cast
+CAMERA_SENSOR = "imx219"
+CAMERA_GRAYSCALE = False    # grey image from the ISP (the model was trained on colour)
+
+# ---- Display and dashboard ----
+DISPLAY_ENABLED = not sys.platform.startswith("linux")   # local preview window; on the Pi use the dashboard
 DISPLAY_SCALE = 1.0
+WEB_VIEW_ENABLED = True
+DASHBOARD_PIN = "1234"      # protects the dashboard controls; change before a demo
+WEB_VIEW_HOST = "0.0.0.0"
+WEB_VIEW_PORT = 8080
+WEB_VIEW_FPS = 10
+WEB_VIEW_WIDTH = 1280
+WEB_VIEW_JPEG_QUALITY = 80
+WEB_STATUS_INTERVAL_SEC = 0.2
+WEB_HISTORY_INTERVAL_SEC = 0.25
+WEB_HISTORY_SEC = 600       # live chart history (10 minutes)
+SESSION_HISTORY_ENABLED = True
+SESSION_HISTORY_KEEP = 20   # sessions kept in the database
 
-# --------------------------------------------------------------------------
-# Calibration
-# --------------------------------------------------------------------------
-CALIBRATION_SEC = 3.0    # look straight ahead, eyes open, at startup
+APP_NICE = 10               # lower CPU priority so the desktop, audio and Bluetooth stay responsive
 
-# --------------------------------------------------------------------------
-# Eye / drowsiness thresholds (Phases 4-6)
-# --------------------------------------------------------------------------
-EAR_CLOSED_RATIO = 0.80          # eye considered closed if EAR < 80% of calibrated baseline
-EAR_SMOOTHING_FRAMES = 3         # rolling average window, lower = faster response
-EAR_MICROSLEEP_SEC = 1.0         # short closure - "microsleep" warning tier
-EAR_SLEEPING_SEC = 2.5           # sustained closure - "sleeping" / HIGH risk tier
+# ---- Calibration ----
+CALIBRATION_SEC = 3.0
 
+# ---- Eyes ----
+EAR_CLOSED_RATIO = 0.80     # closed below 80 % of the driver's own baseline
+EAR_SMOOTHING_FRAMES = 3
+EAR_MICROSLEEP_SEC = 1.0
+EAR_SLEEPING_SEC = 2.5
+EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0   # head this far down: eyes look closed, so they are ignored
 BLINK_WINDOW_SEC = 5.0
-BLINK_RATE_DROWSY_THRESHOLD = 6  # blinks within window considered excessive/drowsy
+BLINK_RATE_DROWSY_THRESHOLD = 6
 
-# --------------------------------------------------------------------------
-# Yawn detection (Mouth Aspect Ratio, same "relative to calibrated baseline"
-# design as EAR above - a fixed absolute MAR doesn't generalize across
-# different faces/cameras, but a multiple of the driver's own calibrated
-# neutral/closed-mouth MAR does).
-# --------------------------------------------------------------------------
+# ---- Mouth / yawning ----
 MAR_SMOOTHING_FRAMES = 3
-# A yawn is a much wider, more sustained gape than speech ever produces -
-# an open vowel or a drawn-out word can still briefly cross a low ratio/
-# short duration, which is what was causing normal talking to register as
-# yawning. Both raised so only a genuine wide, held-open mouth counts:
-MAR_YAWN_RATIO = 2.6            # mouth counted "open" once MAR exceeds this multiple of baseline
-# The ratio alone fails: with the mouth closed the two inner-lip points almost
-# touch, so the calibrated baseline is ~0.004 and 2.6 x baseline is only ~0.01 -
-# any slightly parted lips (talking, breathing, a smile) counted as "open".
-# Measured MAR: speech stays under ~0.3, a yawn reaches 0.45-0.7, so the mouth
-# must exceed this absolute value as well.
-MAR_OPEN_MIN = 0.35
-YAWN_MIN_DURATION_SEC = 3.2     # must stay open this long to count as a yawn, not talking/a word
-YAWN_RATE_WINDOW_SEC = 10.0     # window for counting repeated yawns
-YAWN_RATE_DROWSY_THRESHOLD = 2  # 2+ yawns within the window is itself a (still LOW-risk) signal
+MAR_YAWN_RATIO = 2.6        # open above 2.6 x the baseline...
+MAR_OPEN_MIN = 0.35         # ...and above this absolute value (talking stays under ~0.3)
+YAWN_MIN_DURATION_SEC = 3.2
+YAWN_RATE_WINDOW_SEC = 10.0
+YAWN_RATE_DROWSY_THRESHOLD = 2
 
-# --------------------------------------------------------------------------
-# Head pose thresholds (Phase 7)
-# --------------------------------------------------------------------------
-# Split, not symmetric: a plain 6-point solvePnP pitch estimate is noisier
-# tilting down than up (same underlying landmark foreshortening that makes
-# EAR unreliable past EAR_SUPPRESS_PITCH_DOWN_DEG), and drivers legitimately
-# glance down at the dashboard/phone mount/mirrors far more often than they
-# tilt back, so down stays the less twitchy of the two. It was pushed to 15
-# while down-lean was firing on its own, but most of that turned out to be
-# phantom pitch from head turns, which LEAN_IGNORE_WHEN_TURNED_DEG below now
-# suppresses at the source - 15 was then high enough that real forward leans
-# stopped registering at all, so it comes back down to just above the up
-# value rather than compensating twice for the same noise.
-HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 12.0  # forward lean (pitch_delta > this)
-HEAD_LEAN_PITCH_UP_DELTA_DEG = 11.0    # backward lean (pitch_delta < -this)
-# Lean is ignored once the head is turned more than this far from straight
-# ahead. Pitch comes from a 6-landmark solvePnP fit, and on a real turn the
-# far-side eye/mouth corners go partly out of view and drift, skewing pitch
-# (measured: ~8 deg of false pitch at a 40 deg turn) - on top of the genuine
-# downward tilt that checking a door mirror or blind spot involves. Together
-# those pushed ordinary head turns past the lean threshold. Past this angle
-# the turn logic (YAW_TURN_* below) owns the behaviour instead, so it's
-# tracked as a turn rather than double-counted as a lean.
-LEAN_IGNORE_WHEN_TURNED_DEG = 20.0
-
-# A quick mirror check (side/rearview) or a glance at the dash/AC controls is
-# normal, SAFE driving behavior, not distraction - it's usually a moderate
-# yaw excursion held for well under a second. Case 3 in the flowchart is
-# specifically about looking away from the road for >=3s (talking to a
-# passenger, staring out the side window, etc.), so both the angle and the
-# sustain window are set wide enough to not fire on routine glances:
-YAW_TURN_DELTA_DEG = 15.0         # "mild turn" zone entry - deviation from baseline yaw
-# A real head turn to actually look at something (a passenger, a mirror, a
-# blind spot) commonly reads 30-60 deg, not just a few degrees past 15 - with
-# the old 35 deg severe cutoff, most genuine turns skipped straight past LOW
-# into MEDIUM, so LOW almost never appeared. 50 deg reserves "severe" for a
-# driver who is essentially no longer facing the windshield at all (fully
-# turned to a passenger / out the side window), giving LOW its own solid
-# 15-50 deg range that covers ordinary looking-away behavior.
-YAW_TURN_SEVERE_DELTA_DEG = 50.0
-HEAD_TURN_SUSTAIN_SEC = 3.0       # matches flowchart Case 3 ("turned >= 3 sec") exactly -
-                                   # minimum dwell in a turned zone before ANY turn risk registers
-HEAD_TURN_RECHECK_DELAY_SEC = 6.0 # further dwell time per escalation step (LOW->MEDIUM->HIGH,
-                                   # or MEDIUM->HIGH for a severe-angle turn) - same cadence as
-                                   # the head-lean recheck, for a single consistent state machine.
-                                   # Gives LOW a full 3s-9s window of its own before escalating.
-
-HEAD_LEAN_RECHECK_DELAY_SEC = 5.0 # re-check window for sustained leaning (Case 2 logic)
-HEAD_POSE_SMOOTHING_FRAMES = 5    # rolling-average window for raw solvePnP pitch/yaw
-
-# Minimum time the raw pitch signal must hold "leaning" before it's allowed
-# to contribute risk score. Without this, a single noisy solvePnP frame
-# (e.g. transient pitch/yaw coupling error while the driver is simply
-# turning left/right) would inject a full Case-2 MEDIUM score for one frame
-# and then drop it the next - visible as risk flickering between LOW and
-# MEDIUM during an ordinary head turn.
+# ---- Head pose ----
+HEAD_POSE_SMOOTHING_FRAMES = 5
+HEAD_LEAN_PITCH_DOWN_DELTA_DEG = 12.0
+HEAD_LEAN_PITCH_UP_DELTA_DEG = 11.0
+LEAN_IGNORE_WHEN_TURNED_DEG = 20.0   # a turned head fakes pitch, so lean is ignored past this yaw
 LEAN_SCORE_CONFIRM_SEC = 0.5
+HEAD_LEAN_RECHECK_DELAY_SEC = 5.0    # still leaning this much later -> HIGH
+YAW_TURN_DELTA_DEG = 15.0
+YAW_TURN_SEVERE_DELTA_DEG = 50.0
+HEAD_TURN_SUSTAIN_SEC = 3.0          # looking away this long -> first level
+HEAD_TURN_RECHECK_DELAY_SEC = 6.0    # each further step up
 
-# Beyond this pitch-down delta, the driver is looking down at the dashboard/
-# phone rather than asleep - eyelid landmarks foreshorten and EAR becomes
-# unreliable, so eye-closure escalation is suppressed in this band. Must be
-# larger than HEAD_LEAN_PITCH_DOWN_DELTA_DEG so genuine leaning (Case 2)
-# still gets caught independently.
-EAR_SUPPRESS_PITCH_DOWN_DEG = 20.0
+# ---- Presence and covered camera ----
+NO_FACE_GRACE_SEC = 0.9
+PRESENCE_RECOVER_SEC = 0.5
+FRAME_STD_BLOCKED_THRESHOLD = 3.0
+OBSTRUCTION_CONFIRM_SEC = 0.5        # shorter than NO_FACE_GRACE_SEC, so a covered lens is named as such
+OBSTRUCTION_RECOVER_SEC = 0.5
+LOW_LIGHT_BRIGHTNESS_THRESHOLD = 60.0   # below this, CLAHE enhancement
 
-# --------------------------------------------------------------------------
-# Pre-drive readiness check (startup gate)
-# --------------------------------------------------------------------------
-# Two conditions gate the start of monitoring. First, the seatbelt is
-# confirmed fastened. Driver presence isn't part of it - calibration runs immediately
-# before and cannot finish without a face, so the driver is already known to
-# be seated.
-#
-# While the belt is still off the system stays deliberately quiet: it reports
-# the WAITING state, which triggers no voice and no ESP32 actuators. WAITING
-# is still sent on the normal ESP32 interval rather than going silent - the
-# ESP32 treats 6 s of silence (BT_TIMEOUT_MS) as a lost link and raises the full HIGH alarm.
-# Getting in and buckling up is normal behaviour, not a fault to alarm about.
-# The moment the belt is confirmed, normal monitoring begins.
-#
-# "Confirmed" means seen, not merely un-contradicted: seatbelt_off is a
-# tri-state and sits at None until the belt has actually been detected once
-# (see yolo_detector._update_seatbelt), so an unverified belt can't pass the
-# gate by default. The check only applies while the fine-tuned model is
-# loaded - the COCO-pretrained fallback has no seatbelt class at all, so
-# enforcing it there would leave the app permanently waiting with nothing the
-# driver could do about it.
-#
-# Latched once passed: from that point the normal driving rules
-# (SEATBELT_UNWORN_ESCALATE_SEC, presence handling, etc.) own the behaviour,
-# so unbuckling later is a seatbelt violation rather than a failed startup.
-# Pressing 'r' to recalibrate re-arms it, since that restarts the session.
-#
-# Second condition: an alcohol breath test (MQ-3 on the Arduino Uno - see
-# app/cabin_air.py), after the belt. Once the MQ-3 is warm and has its
-# clean-air reference, the voice asks the driver to blow towards the sensor,
-# freely. The test ends as soon as a breath is seen - the MQ-3 rose to
-# ALCOHOL_BREATH_RISE x the reference and then stopped rising for
-# ALCOHOL_BREATH_SETTLE_SEC, so it is judged on the full peak. With no
-# breath within ALCOHOL_BLOW_MAX_SEC it asks again: not blowing never starts
-# the drive. A peak at ALCOHOL_RATIO x the reference or
-# more (or a raw reading at ALCOHOL_RAW_LIMIT) fails it: the drive can't
-# start, and the test repeats after ALCOHOL_RETEST_SEC. With no alcohol
-# sensor - the Uno not found within ALCOHOL_UNO_WAIT_SEC, or an MQ-3 that
-# reads next to nothing - only the seatbelt is checked, so a missing sensor
-# can't block the app.
+# ---- Startup gate: seatbelt, then the alcohol breath test ----
 PRE_DRIVE_CHECK_ENABLED = True
 ALCOHOL_CHECK_ENABLED = True
-ALCOHOL_RATIO = 1.5            # MQ-3 at this multiple of the clean-air reference or more -> alcohol
-ALCOHOL_RAW_LIMIT = 700        # ...or at this raw reading (0-1023), whatever the reference says
-ALCOHOL_BREATH_RISE = 1.05     # a breath raises the MQ-3 at least this much (x the reference)
-ALCOHOL_BREATH_SETTLE_SEC = 2.0  # no new peak for this long -> the breath is over
-ALCOHOL_BLOW_MAX_SEC = 10.0    # no breath seen in this long -> "No breath detected", ask again
-ALCOHOL_RETEST_SEC = 30.0      # after a failed test, test again this much later
-ALCOHOL_UNO_WAIT_SEC = 8.0     # how long to look for the Uno (it takes a few seconds to answer)
-ALCOHOL_SENSOR_MIN_RAW = 15    # MQ-3 clean-air reading below this (0-1023) = no sensor on A0
+ALCOHOL_RATIO = 1.5            # MQ-3 at 1.5 x the clean-air reference -> alcohol
+ALCOHOL_RAW_LIMIT = 700        # or this raw reading (0-1023)
+ALCOHOL_BREATH_RISE = 1.05     # a breath raises the MQ-3 at least this much
+ALCOHOL_BREATH_SETTLE_SEC = 2.0
+ALCOHOL_BLOW_MAX_SEC = 10.0    # no breath seen -> ask again
+ALCOHOL_RETEST_SEC = 30.0
+ALCOHOL_UNO_WAIT_SEC = 8.0
+ALCOHOL_SENSOR_MIN_RAW = 15    # below this the MQ-3 is not connected
 
-# --------------------------------------------------------------------------
-# Presence / camera obstruction (Phase 2 + risk engine)
-# --------------------------------------------------------------------------
-# Leaving the seat or covering the camera must change the state within 1 s.
-# Trade-off: a head turn far enough that no face is found at all (a long
-# over-the-shoulder look) also counts as "not detected" after 1 s.
-NO_FACE_GRACE_SEC = 0.9            # no face detected for this long -> escalate (confirm-in)
-PRESENCE_RECOVER_SEC = 0.5         # face reliably present for this long -> de-escalate (confirm-out)
-FRAME_STD_BLOCKED_THRESHOLD = 3.0  # grayscale std-dev below this -> covered lens / hand / object
-# Shorter than NO_FACE_GRACE_SEC so a covered lens is reported as "camera
-# blocked" (the specific cause) rather than first as "driver not detected".
-OBSTRUCTION_CONFIRM_SEC = 0.5      # low-variance must persist this long before flagging (confirm-in)
-OBSTRUCTION_RECOVER_SEC = 0.5      # normal variance must persist this long to clear (confirm-out)
-
-# --------------------------------------------------------------------------
-# Low-light handling (plain RGB camera, must work day and night)
-# --------------------------------------------------------------------------
-LOW_LIGHT_BRIGHTNESS_THRESHOLD = 60.0  # mean grayscale brightness below this -> apply CLAHE enhancement
-
-# --------------------------------------------------------------------------
-# YOLO / distraction detection (Phases 8-12)
-# --------------------------------------------------------------------------
-# Kept low - this is the floor applied INSIDE model.predict() itself, so
-# anything below it never even reaches our code at all. Per-class filtering
-# happens afterward in yolo_detector.py via YOLO_CLASS_CONF_THRESHOLDS below,
-# so this just needs to be <= the lowest per-class threshold to make sure
-# nothing potentially useful gets discarded before that logic runs.
-YOLO_ENABLED = True   # False = no object detection at all (diagnostics only)
-YOLO_CONF_THRESHOLD = 0.20
-
-# Per-class confidence floor, applied in yolo_detector.py after the raw
-# (low-threshold) predict() call above. A single global threshold can't
-# serve every class well: phone needs to stay permissive (missed phones -
-# false negatives - were the bigger problem), while consumption needs to
-# be stricter (weak/wrong "Drinking"/"Eating" guesses - false positives -
-# were the problem). Classes not listed fall back to YOLO_CLASS_CONF_DEFAULT.
+# ---- Object detection (YOLO) ----
+YOLO_ENABLED = True
+YOLO_IMG_SIZE = 640
+YOLO_INTERVAL_SEC = 0.4
+YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 2)
+YOLO_CONF_THRESHOLD = 0.20     # floor inside the model; per-class thresholds below
 YOLO_CLASS_CONF_THRESHOLDS = {
     "phone": 0.30,
-    "consumption": 0.50,  # Drinking+Eating merged - see the merge note below
-    "seatbelt": 0.27,     # 0.27 for the 5 Nov model (was 0.50, 0.35, 0.37, 0.25)
-    "cigarette": 0.35,    # working well at this level - don't disturb
+    "consumption": 0.50,       # eating and drinking
+    "seatbelt": 0.27,
+    "cigarette": 0.35,
 }
 YOLO_CLASS_CONF_DEFAULT = 0.35
-YOLO_IMG_SIZE = 640
-# The camera frame is 16:9, but the square 640x640 model pads it with ~44%
-# grey bars that YOLO still has to process. The 384x640 export (same
-# weights, same detail - 640 px wide either way) does ~40% less work per
-# inference (measured 22.0 -> 13.1 ms). Off until checked on the Pi: run
-# once with each and compare the boxes/confidences on the overlay.
-# Re-create it with: python training/export.py --format ncnn --imgsz 384 640
-YOLO_USE_16X9_MODEL = False
-if YOLO_USE_16X9_MODEL:
-    YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_384x640_ncnn_model")
-    YOLO_IMG_SIZE = (384, 640)   # (height, width)
-# How often a frame is handed to YOLO (it runs in its own process - see
-# yolo_detector.YoloProcess). Time-based, so YOLO's CPU load no longer
-# grows when the main loop gets faster. 0.4 s ~ the old every-6th-frame
-# cadence at 15 FPS; with 2-of-3 confirmation a detection is confirmed in
-# roughly 0.8-1.0 s (the 1 s detection-delay requirement).
-YOLO_INTERVAL_SEC = 0.4
-# Uncapped, NCNN/torch grab every CPU core for the duration of each
-# inference call. On the Pi that starves the desktop session itself -
-# window manager, compositor, mouse cursor - of CPU time each time YOLO
-# runs, not just this app (confirmed: "whole system freezes, even moving
-# the mouse" while running with a live desktop session). Leaving only 1
-# core free (cpu_count - 1) still left visible compositor stalls - checked
-# mediapipe 0.10.14's BaseOptions directly (no num_threads exposed in this
-# version's Python API, only a CPU/GPU delegate choice), so MediaPipe's own
-# per-frame thread usage can't be capped the same way; leaving 2 cores free
-# instead gives the compositor more room to coexist with whatever MediaPipe
-# is doing on its own, uncapped, every single frame.
-YOLO_INFERENCE_THREADS = max(1, os.cpu_count() - 2)
-PHONE_REPEAT_TRIGGER = 3          # Nth phone detection in session -> escalate
-CONSUMPTION_REPEAT_TRIGGER = 3    # Nth eating/drinking detection -> escalate
-SEATBELT_UNWORN_ESCALATE_SEC = 10.0
-
-# Some fine-tuned models (e.g. this project's current best.pt) only have a
-# "Seatbelt" (worn/visible) class, not a distinct "unworn" class - there's
-# no box to draw around an absent object. seatbelt_off is inferred via
-# Hysteresis (DetectionConfirmer in yolo_detector.py), deliberately
-# asymmetric: a real cabin has the belt flicker out of view constantly
-# (hands, steering, camera angle), so re-confirming "on" should be fast;
-# a real removal is sustained, so confirming "off" should be patient.
-SEATBELT_ON_CONFIRM_SEC = 0.5    # belt seen worn -> confirm "on" quickly
-SEATBELT_OFF_CONFIRM_SEC = 5.0   # belt continuously unseen this long -> confirm "off".
-                                 # Only applies AFTER the belt has been confirmed worn at
-                                 # least once (see _seatbelt_ever_seen in yolo_detector.py).
-                                 # Trade-off: a belt hidden by hands/arms/steering for longer
-                                 # than this also reads as "off". Was 12 s; lowered for a
-                                 # quicker reaction.
-
-# K-of-N voting: an object flag only counts as active once it appears in at
-# least YOLO_CONFIRM_MIN of the last YOLO_CONFIRM_WINDOW inferences. Symmetric
-# by construction - the same weight of evidence is needed to set or clear it.
-YOLO_CONFIRM_WINDOW = 3
+YOLO_CONFIRM_WINDOW = 3        # a detection counts in 2 of the last 3 results
 YOLO_CONFIRM_MIN = 2
-
-# Case 5: only DRINKING requires the object to be near the mouth (29 Oct);
-# eating and smoking count anywhere in the frame.
-# Radius, as a multiple of the mouth-corner distance, defining "near".
-# 3.5x worked out to roughly a quarter of the frame width in testing - far
-# wider than "near the mouth" should mean, and a second, independent source
-# of drink false positives alongside a too-low confidence threshold. 1.5x
-# then turned out too tight the other way (a bottle genuinely being raised
-# to drink wasn't counting) - nudged up modestly, not back toward 3.5.
 MOUTH_PROXIMITY_RADIUS_MULT = 1.5
-# Drinking gets a wider zone: a bottle or cup tilted up to the lips is long,
-# so the center of its box sits well away from the mouth even mid-sip.
-DRINK_MOUTH_RADIUS_MULT = 2.5
+DRINK_MOUTH_RADIUS_MULT = 2.5  # drinking counts only within this x the mouth width
+SEATBELT_ON_CONFIRM_SEC = 0.5
+SEATBELT_OFF_CONFIRM_SEC = 5.0
+SEATBELT_UNWORN_ESCALATE_SEC = 10.0
+PHONE_REPEAT_TRIGGER = 3       # every 3rd time in a session adds a point
+CONSUMPTION_REPEAT_TRIGGER = 3
 
-# COCO class names (pretrained yolo11n.pt) that approximate our target behaviors
-# until the fine-tuned model (Phase 11) with real "phone/seatbelt/cigarette/food"
-# classes is available.
-COCO_PHONE_CLASSES = {"cell phone"}
-# Drinking and Eating merged into one "consumption" signal - a single-frame
-# object detector can't reliably tell the two apart (both are usually just
-# "some small object near a hand near the mouth"; the fine-tuned model's own
-# separate Drinking/Eating classes needed repeated confidence-threshold
-# tuning for exactly this reason). risk_engine.py already ORs them into one
-# consumption_active signal for scoring - this makes that unification
-# consistent all the way down instead of just at the risk-scoring layer.
-COCO_CONSUMPTION_CLASSES = {
-    "bottle", "cup", "wine glass",
-    "banana", "apple", "sandwich", "orange", "pizza", "donut", "cake",
-}
-# NOTE: "seatbelt" and "cigarette" do NOT exist in COCO's 80 classes.
-# These will read as None (unknown) until Phase 9-12 (your fine-tuned best.pt) is trained.
-
-# --------------------------------------------------------------------------
-# Risk engine scoring (Phase 13)
-# --------------------------------------------------------------------------
-# Score thresholds -> Risk level (used for *combined* conditions, e.g.
-# drowsy + phone use together should be worse than either alone).
+# ---- Risk score ----
 SCORE_LOW_MIN = 1
 SCORE_MEDIUM_MIN = 2
 SCORE_HIGH_MIN = 4
 
-# --------------------------------------------------------------------------
-# Logging
-# --------------------------------------------------------------------------
-# The per-second status line in the terminal. False = no live log (the CSV
-# session log, [PROFILE]/[SYSTEM] diagnostics and warnings still print).
+# ---- Logging and requirements ----
 CONSOLE_LOG_ENABLED = True
 CONSOLE_LOG_INTERVAL_SEC = 1.0
-CSV_LOG_INTERVAL_SEC = 1.0
-# Requirement (Requirements spec, updated to the measured system): the risk
-# classification updates at an average of at least 12 Hz, with no gap
-# between two consecutive classifications longer than 1 s. main.py prints a
-# [RISK-RATE] line on the [PROFILE] cadence with the rate and the LONGEST
-# gap (the worst case matters - a 15 Hz average still fails if one frame
-# stalls for 2 s); the dashboard shows both as pass/fail.
+PROFILE_LOG_INTERVAL_SEC = 5.0
 RISK_UPDATE_MIN_AVG_HZ = 12.0
-RISK_UPDATE_MIN_HZ = 1.0        # worst case: max gap = 1 / this = 1 s
-# When True, every single classification's monotonic timestamp is written
-# to logs/risk_updates_<session>.csv for offline verification with
-# tools/check_update_rate.py. Off by default: one row per frame is ~15
-# rows/s, harmless but unnecessary outside a test run.
-RISK_UPDATE_LOG = False
-PROFILE_LOG_INTERVAL_SEC = 5.0  # per-stage timing breakdown, to find the real FPS bottleneck
+RISK_UPDATE_MIN_HZ = 1.0       # no gap over 1 s
+RISK_UPDATE_LOG = False        # every classification to logs/ (tools/check_update_rate.py)
 
-# --------------------------------------------------------------------------
-# ESP32 link (Phase 14 - Bluetooth SPP / RFCOMM)
-# --------------------------------------------------------------------------
-# Connects with a raw AF_BLUETOOTH/BTPROTO_RFCOMM socket directly to the
-# ESP32's MAC address - no `rfcomm bind`/`/dev/rfcommX` device file
-# involved. Requires the device to already be paired + trusted first
-# (`bluetoothctl pair`/`trust` - see README); that part is unchanged.
-# Fill in your ESP32's actual MAC address (`bluetoothctl devices` after
-# pairing, or read it off the ESP32's own Serial Monitor output at boot).
-ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
-# Kill switch for dev machines without the real ESP32 nearby (e.g. a
-# laptop). Esp32Link is deliberately synchronous (see its docstring - a
-# background thread here caused a proven, severe freeze on the Pi), which
-# means a reconnect attempt blocks the main loop for however long
-# connect() takes to fail when unreachable - confirmed on Windows, that's
-# multiple real seconds (WinError 10060), recurring every
-# ESP32_RECONNECT_COOLDOWN_SEC. That's an accepted, documented cost on
-# the Pi where the ESP32 is actually present, but pure waste on a machine
-# that will never have one nearby. False skips Esp32Link entirely -
-# dispatch() logs what it would have sent instead of touching the socket.
+# ---- ESP32 (Bluetooth) ----
 ESP32_LINK_ENABLED = True
-ESP32_RFCOMM_PORT = 1  # SPP channel - matches BluetoothSerial's default on the ESP32 side
-ESP32_SEND_INTERVAL_SEC = 0.3   # also the de facto link heartbeat - see esp32/ sketch
-# ---- Spoken alerts (app/voice.py - phrases and per-warning repeat
-# intervals live there, in PROMPTS) ----
-VOICE_ALERTS_ENABLED = True
-VOICE_MIN_GAP_SEC = 2.0          # silence between any two prompts
-VOICE_CONFIRM_SEC = 0.5          # a warning must persist this long before it is spoken
-VOICE_CRITICAL_REPEAT_SEC = 4.0  # HIGH-risk prompt repeats while the danger lasts
-# Natural-sounding voice (Piper, offline neural TTS - pip install piper-tts).
-# A voice name looked up in models/piper/ (download with
-# tools/get_piper_voice.py), or a path to an .onnx voice. Used when installed;
-# otherwise espeak-ng (Pi) / say (macOS). Phrases render once and are cached.
-VOICE_PIPER_VOICE = "en_US-ryan-high"
-ESP32_RECONNECT_COOLDOWN_SEC = 5.0  # wait after a failed connection attempt...
-ESP32_RECONNECT_MAX_COOLDOWN_SEC = 30.0  # ...doubling on each further failure, up to this
-# Each attempt ties up the Pi's Bluetooth radio for several seconds while it
-# pages the ESP32 - shared with a Bluetooth speaker (audio stutter) and,
-# on the Pi's combo chip, with Wi-Fi. Backing off keeps an ESP32 that is
-# switched off from degrading the rest of the system.
-ESP32_SEND_FAILURE_TOLERANCE = 3    # consecutive send failures before tearing down + reconnecting
-                                     # (a single slow send is often just a transient hiccup, not a
-                                     # real disconnect - see Esp32Link.send() in alerts.py)
+ESP32_MAC_ADDRESS = "08:B6:1F:3B:1A:AA"
+ESP32_RFCOMM_PORT = 1
+ESP32_SEND_INTERVAL_SEC = 0.3          # also the heartbeat: 6 s of silence stops the car
+ESP32_RECONNECT_COOLDOWN_SEC = 5.0     # doubles after each failure...
+ESP32_RECONNECT_MAX_COOLDOWN_SEC = 30.0  # ...up to this
+ESP32_SEND_FAILURE_TOLERANCE = 3
 
-# Arduino Uno with the cabin air sensors (MQ-3 alcohol, MQ-2 smoke/gas) on a
-# USB cable - sketch in arduino/DriverGuardian_Uno, link in app/arduino.py.
-# Shown on the dashboard and recorded. The MQ-3 gates the start of the drive
-# (ALCOHOL_* above); the MQ-2 is the second way of detecting smoking (below).
+# ---- Voice ----
+VOICE_ALERTS_ENABLED = True
+VOICE_MIN_GAP_SEC = 2.0
+VOICE_CONFIRM_SEC = 0.5
+VOICE_CRITICAL_REPEAT_SEC = 4.0
+VOICE_PIPER_VOICE = "en_US-ryan-high"  # in models/piper/ (tools/get_piper_voice.py)
+
+# ---- Arduino Uno: gas sensors and seat vibration ----
 ARDUINO_ENABLED = True
-# "auto" searches Arduino / CH340 USB ports for the Uno. If the ESP32 is also
-# on a Pi USB port, give the Uno's fixed path instead, e.g.
-# "/dev/serial/by-id/usb-Arduino__www.arduino.cc__0043_...-if00" (ls /dev/serial/by-id/)
 ARDUINO_PORT = "auto"
 ARDUINO_BAUD = 115200
-# MQ heater warm-up, counted on the Pi from when the Uno got power (its USB
-# port appeared) - opening the port resets the Uno, so the sketch's own
-# warm-up flag restarts every time the app starts and isn't used here.
 ARDUINO_WARMUP_SEC = 30
-# The clean-air reference each reading is divided by (mq3_rel / mq2_rel):
-# the average of the first AIR_REF_INIT_SEC once warm, then it follows clean
-# air - down quickly (AIR_REF_DOWN_SEC), up slowly (AIR_REF_UP_SEC), and not
-# at all while a reading is AIR_REF_FREEZE_RATIO x above it, so alcohol or
-# smoke never becomes the new "clean air". Slow changes (temperature, outside
-# air drifting in) are absorbed; a fast rise, like a cigarette, stands out.
-AIR_REF_INIT_SEC = 10.0
-AIR_REF_DOWN_SEC = 30.0
-AIR_REF_UP_SEC = 300.0
-AIR_REF_FREEZE_RATIO = 1.2
-# Pin 6 on the Uno (BTS7960 seat vibration, 3 s burst, "1" command) when the
-# driver is asleep and the eyes have been closed for ARDUINO_FAN_SLEEP_SEC -
-# not for a microsleep - repeated every ARDUINO_FAN_REPEAT_SEC while it lasts.
-# None turns it off. The only thing the Uno does to the car.
-ARDUINO_FAN_SLEEP_SEC = 3.0
-ARDUINO_FAN_REPEAT_SEC = 10.0
-# Smoking (LOW risk, its own voice alert) is detected either by the camera
-# (the model's Smoking class, near the mouth) or by smoke in the cabin air:
-# the MQ-2 at SMOKE_RATIO_ON x its clean-air reference (or SMOKE_RAW_LIMIT)
-# for SMOKE_CONFIRM_SEC, rising more than the MQ-3 (otherwise it's alcohol
-# vapour - see app/cabin_air.py). It clears once the MQ-2 falls below
-# SMOKE_RATIO_OFF - lower than the "on" level so a reading hovering at the
-# limit doesn't flicker on and off.
+ARDUINO_FAN_SLEEP_SEC = 3.0    # seat vibration after 3 s of sleep...
+ARDUINO_FAN_REPEAT_SEC = 10.0  # ...and every 10 s while it lasts
+AIR_REF_INIT_SEC = 10.0        # clean-air reference: average of the first 10 s,
+AIR_REF_DOWN_SEC = 30.0        # then follows clean air down quickly,
+AIR_REF_UP_SEC = 300.0         # up slowly,
+AIR_REF_FREEZE_RATIO = 1.2     # and not at all while a reading is 1.2 x above it
 SMOKE_RATIO_ON = 1.5
 SMOKE_RATIO_OFF = 1.3
 SMOKE_RAW_LIMIT = 700
 SMOKE_CONFIRM_SEC = 2.0
-# Alcohol during the drive (MEDIUM risk): the MQ-3 at ALCOHOL_RATIO (or
-# ALCOHOL_RAW_LIMIT) for ALCOHOL_DRIVE_CONFIRM_SEC, rising more than the MQ-2;
-# it clears below ALCOHOL_DRIVE_CLEAR_RATIO.
 ALCOHOL_DRIVE_CONFIRM_SEC = 3.0
 ALCOHOL_DRIVE_CLEAR_RATIO = 1.3
 
-
-# --------------------------------------------------------------------------
-# Quick experiments without editing this file - environment variables
-# override the settings above for one run, e.g.:
-#     DG_DISPLAY=0 python -m app.main
-#     DG_CAMERA_FPS=15 DG_DISPLAY_SCALE=0.5 python -m app.main
-# --------------------------------------------------------------------------
+# ---- One-run overrides from the environment ----
 _ENV_OVERRIDES = {
     "DG_DISPLAY": ("DISPLAY_ENABLED", bool),
     "DG_DISPLAY_SCALE": ("DISPLAY_SCALE", float),
@@ -541,7 +181,6 @@ _ENV_OVERRIDES = {
     "DG_GRAY": ("CAMERA_GRAYSCALE", bool),
     "DG_YOLO": ("YOLO_ENABLED", bool),
     "DG_VOICE": ("VOICE_ALERTS_ENABLED", bool),
-    "DG_16X9": ("YOLO_USE_16X9_MODEL", bool),
     "DG_ESP32": ("ESP32_LINK_ENABLED", bool),
     "DG_ARDUINO": ("ARDUINO_ENABLED", bool),
     "DG_ARDUINO_PORT": ("ARDUINO_PORT", str),
@@ -557,8 +196,5 @@ for _var, (_name, _type) in _ENV_OVERRIDES.items():
     if _var in os.environ:
         _raw = os.environ[_var].strip()
         globals()[_name] = (_raw.lower() not in ("0", "false", "no", "off")) if _type is bool else _type(_raw)
-        if _name == "YOLO_USE_16X9_MODEL" and globals()[_name]:
-            YOLO_NCNN_PATH = os.path.join(MODELS_DIR, "best_384x640_ncnn_model")
-            YOLO_IMG_SIZE = (384, 640)
         _shown = "(set)" if _name == "DASHBOARD_PIN" else repr(globals()[_name])
         print(f"[config] {_name} = {_shown}  (from {_var})")

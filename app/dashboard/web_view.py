@@ -1,0 +1,336 @@
+"""The dashboard web server (port 8080): the page, the live video, the JSON API.
+
+Watching needs nothing; every change needs the PIN. JPEG encoding runs on its
+own thread and only while someone watches the video.
+"""
+
+import csv
+import io
+import hmac
+import json
+import os
+import re
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
+
+import cv2
+
+from app import config
+from app.dashboard.storage import FLAG_BITS
+
+_WEB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "web")
+_CONTENT_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
+                  ".js": "text/javascript; charset=utf-8", ".svg": "image/svg+xml",
+                  ".woff2": "font/woff2"}
+_ACTIONS = {"pause", "resume", "new_session", "stop", "recalibrate", "mute", "unmute",
+            "test_start", "test_stop"}
+_PIN_MAX_FAILS, _PIN_LOCK_SEC = 5, 60.0
+
+
+def _lan_address():
+    """Best-guess LAN IP for the startup message (no packet is sent)."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("10.255.255.255", 1))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except OSError:
+        return "127.0.0.1"
+
+
+class WebView:
+    def __init__(self, recorder, store=None):
+        self.recorder, self.store = recorder, store
+        self.enabled = config.WEB_VIEW_ENABLED
+        self._cond = threading.Condition()
+        self._frame = None
+        self._frame_seq = 0
+        self._jpeg = None
+        self._jpeg_seq = 0
+        self._viewers = 0
+        self._last_handoff = 0.0
+        self._commands = []
+        self._cmd_lock = threading.Lock()
+        self._pin_fails = {}
+        if not self.enabled:
+            return
+        try:
+            self._server = ThreadingHTTPServer((config.WEB_VIEW_HOST, config.WEB_VIEW_PORT), self._handler())
+        except OSError as e:
+            print(f"[web] dashboard unavailable - port {config.WEB_VIEW_PORT}: {e}")
+            self.enabled = False
+            return
+        self._server.daemon_threads = True
+        threading.Thread(target=self._server.serve_forever, daemon=True).start()
+        threading.Thread(target=self._encoder, daemon=True).start()
+        host = socket.gethostname().removesuffix(".local")
+        print(f"[web] Dashboard: http://{host}.local:{config.WEB_VIEW_PORT}  "
+              f"(or http://{_lan_address()}:{config.WEB_VIEW_PORT})")
+
+    def wants_frame(self, now: float) -> bool:
+        """True when someone is watching and the next stream frame is due."""
+        return (self.enabled and self._viewers > 0
+                and now - self._last_handoff >= 1.0 / config.WEB_VIEW_FPS)
+
+    def publish(self, frame, now: float):
+        """Hands over a finished frame (the main loop does not draw on it afterwards)."""
+        self._last_handoff = now
+        with self._cond:
+            self._frame = frame
+            self._frame_seq += 1
+            self._cond.notify_all()
+
+    def take_commands(self):
+        """Commands queued by the dashboard since the last call."""
+        with self._cmd_lock:
+            cmds, self._commands = self._commands, []
+        return cmds
+
+    def close(self):
+        if self.enabled:
+            self._server.shutdown()
+
+    def _encoder(self):
+        seen = 0
+        while True:
+            with self._cond:
+                self._cond.wait_for(lambda: self._frame_seq != seen)
+                frame, seen = self._frame, self._frame_seq
+            h, w = frame.shape[:2]
+            if w > config.WEB_VIEW_WIDTH:
+                frame = cv2.resize(frame, (config.WEB_VIEW_WIDTH, round(h * config.WEB_VIEW_WIDTH / w)),
+                                   interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, config.WEB_VIEW_JPEG_QUALITY])
+            if ok:
+                with self._cond:
+                    self._jpeg, self._jpeg_seq = buf.tobytes(), self._jpeg_seq + 1
+                    self._cond.notify_all()
+
+    def _handler(self):
+        view = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def _send(self, code, ctype, body, extra_headers=None):
+                self.send_response(code)
+                self.send_header("Content-Type", ctype)
+                self.send_header("Content-Length", str(len(body)))
+                if "Cache-Control" not in (extra_headers or {}):
+                    self.send_header("Cache-Control", "no-store")
+                for k, v in (extra_headers or {}).items():
+                    self.send_header(k, v)
+                self.end_headers()
+                self.wfile.write(body)
+
+            def _json(self, obj, code=200):
+                self._send(code, "application/json", json.dumps(obj, separators=(",", ":")).encode())
+
+            def _error(self, code, msg):
+                self._json({"ok": False, "error": msg}, code)
+
+            def _body(self):
+                n = int(self.headers.get("Content-Length") or 0)
+                if n > 8192:
+                    raise ValueError("request too large")
+                raw = self.rfile.read(n) if n else b""
+                return json.loads(raw or b"{}")
+
+            def _trusted(self):
+                """Only the dashboard's own scripts send this header (blocks cross-site requests)."""
+                return self.headers.get("X-DriverGuardian") == "1"
+
+            def _pin_check(self, pin):
+                """True if the PIN is right. Five wrong tries lock that address out for a minute."""
+                if not config.DASHBOARD_PIN:
+                    return True
+                ip = self.client_address[0]
+                fails, until = view._pin_fails.get(ip, (0, 0.0))
+                if time.monotonic() < until:
+                    raise PermissionError("locked")
+                if hmac.compare_digest(str(pin or "").encode(), config.DASHBOARD_PIN.encode()):
+                    view._pin_fails.pop(ip, None)
+                    return True
+                fails += 1
+                view._pin_fails[ip] = (fails, time.monotonic() + _PIN_LOCK_SEC if fails >= _PIN_MAX_FAILS else 0.0)
+                return False
+
+            def _authorized(self):
+                if not self._trusted():
+                    self._error(403, "forbidden")
+                    return False
+                try:
+                    ok = self._pin_check(self.headers.get("X-DG-PIN"))
+                except PermissionError:
+                    self._json({"ok": False, "error": "too many wrong PINs - try again in a minute", "pin": True}, 429)
+                    return False
+                if not ok:
+                    self._json({"ok": False, "error": "PIN required", "pin": True}, 401)
+                return ok
+
+            def do_GET(self):
+                url = urlparse(self.path)
+                q = parse_qs(url.query)
+                path = url.path
+                try:
+                    if path in ("/", "/index.html"):
+                        return self._static("index.html")
+                    if path.startswith("/static/"):
+                        return self._static(path[len("/static/"):])
+                    if path == "/api/state":
+                        state, at = view.recorder.snapshot()
+                        state["age_sec"] = (time.monotonic() - at) if at else None
+                        state["viewers"] = view._viewers
+                        state["history_keep"] = config.SESSION_HISTORY_KEEP
+                        state["pin_required"] = bool(config.DASHBOARD_PIN)
+                        return self._json(state)
+                    if path == "/api/history":
+                        return self._json({"samples": view.recorder.history_since(float(q.get("since", ["-1"])[0])),
+                                           "window_sec": config.WEB_HISTORY_SEC})
+                    if path == "/api/events":
+                        return self._json({"events": view.recorder.events_since(int(q.get("since", ["0"])[0]))})
+                    if path == "/snapshot.jpg":
+                        if view._jpeg is None:
+                            return self._error(503, "no frame yet - open the dashboard first")
+                        return self._send(200, "image/jpeg", view._jpeg)
+                    if path == "/stream.mjpg":
+                        return self._stream()
+                    m = re.fullmatch(r"/api/sessions(?:/(\d+)(?:/(samples|events)\.csv)?)?", path)
+                    if m:
+                        return self._sessions_get(m.group(1), m.group(2))
+                    self._error(404, "not found")
+                except ValueError:
+                    self._error(400, "bad request")
+
+            def _sessions_get(self, sid, csv_kind):
+                if view.store is None:
+                    return self._error(503, "session history is disabled")
+                current = view.recorder.session_id
+                if sid is None:
+                    rows = view.store.list_sessions()
+                    for r in rows:
+                        r["status"] = "live" if r["id"] == current else "complete" if r["ended_ts"] else "interrupted"
+                        if r["id"] == current:
+                            r["summary"] = view.recorder.live_summary()
+                    return self._json({"sessions": rows, "keep": config.SESSION_HISTORY_KEEP})
+                s = view.store.get_session(int(sid))
+                if s is None:
+                    return self._error(404, "session not found")
+                s["status"] = "live" if s["id"] == current else "complete" if s["ended_ts"] else "interrupted"
+                if s["id"] == current:
+                    s["summary"] = view.recorder.live_summary()
+                if csv_kind is None:
+                    return self._json(s)
+                rows = s["samples"] if csv_kind == "samples" else s["events"]
+                if csv_kind == "samples":
+                    rows = [{**{k: v for k, v in r.items() if k != "flags"},
+                             **{name: ("" if r.get("flags") is None else int(bool(r["flags"] & bit)))
+                                for name, bit in FLAG_BITS.items()}} for r in rows]
+                buf = io.StringIO()
+                if rows:
+                    w = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+                    w.writeheader()
+                    for r in rows:
+                        r = dict(r)
+                        r["time"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(r["ts"]))
+                        w.writerow({k: r[k] for k in rows[0].keys()} | ({"ts": r["time"]}))
+                safe = re.sub(r"[^\w.-]+", "_", s["label"] or f"session_{sid}")
+                self._send(200, "text/csv; charset=utf-8", buf.getvalue().encode(),
+                           {"Content-Disposition": f'attachment; filename="{safe}_{csv_kind}.csv"'})
+
+            def do_POST(self):
+                path = urlparse(self.path).path
+                if path == "/api/auth":
+                    if not self._trusted():
+                        return self._error(403, "forbidden")
+                    try:
+                        ok = self._pin_check(self._body().get("pin"))
+                    except PermissionError:
+                        return self._json({"ok": False, "error": "too many wrong PINs - try again in a minute"}, 429)
+                    except (ValueError, json.JSONDecodeError):
+                        return self._error(400, "bad request")
+                    return self._json({"ok": ok}, 200 if ok else 401)
+                if not self._authorized():
+                    return
+                try:
+                    body = self._body()
+                except (ValueError, json.JSONDecodeError):
+                    return self._error(400, "bad request")
+                if path == "/api/control":
+                    action = body.get("action")
+                    if action not in _ACTIONS:
+                        return self._error(400, "unknown action")
+                    with view._cmd_lock:
+                        view._commands.append((action, body))
+                    return self._json({"ok": True})
+                if path == "/api/marker":
+                    view.recorder.mark(str(body.get("text") or "Marker"))
+                    return self._json({"ok": True})
+                m = re.fullmatch(r"/api/sessions/(\d+)", path)
+                if m and view.store is not None:
+                    sid = int(m.group(1))
+                    label, notes = body.get("label"), body.get("notes")
+                    if sid == view.recorder.session_id and label:
+                        view.recorder.set_label(str(label))
+                    fields = {}
+                    if label and sid != view.recorder.session_id:
+                        fields["label"] = str(label).strip()[:120]
+                    if notes is not None:
+                        fields["notes"] = str(notes)[:2000]
+                    if fields:
+                        view.store.update_session(sid, **fields)
+                    return self._json({"ok": True})
+                self._error(404, "not found")
+
+            def do_DELETE(self):
+                if not self._authorized():
+                    return
+                m = re.fullmatch(r"/api/sessions/(\d+)", urlparse(self.path).path)
+                if not m or view.store is None:
+                    return self._error(404, "not found")
+                if int(m.group(1)) == view.recorder.session_id:
+                    return self._error(409, "this session is still running - end it first")
+                view.store.delete_session(int(m.group(1)))
+                self._json({"ok": True})
+
+            def _static(self, name):
+                ext = os.path.splitext(name)[1]
+                if not re.fullmatch(r"[\w.-]+", name) or ext not in _CONTENT_TYPES:
+                    return self._error(404, "not found")
+                try:
+                    with open(os.path.join(_WEB_DIR, name), "rb") as f:
+                        body = f.read()
+                except OSError:
+                    return self._error(404, "not found")
+                self._send(200, _CONTENT_TYPES[ext], body)
+
+            def _stream(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "multipart/x-mixed-replace; boundary=frame")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                with view._cond:
+                    view._viewers += 1
+                seen = 0
+                try:
+                    while True:
+                        with view._cond:
+                            if not view._cond.wait_for(lambda: view._jpeg_seq != seen, timeout=5.0):
+                                continue
+                            jpeg, seen = view._jpeg, view._jpeg_seq
+                        self.wfile.write(b"--frame\r\nContent-Type: image/jpeg\r\n"
+                                         b"Content-Length: " + str(len(jpeg)).encode() + b"\r\n\r\n")
+                        self.wfile.write(jpeg)
+                        self.wfile.write(b"\r\n")
+                except (BrokenPipeError, ConnectionResetError, OSError):
+                    pass
+                finally:
+                    with view._cond:
+                        view._viewers -= 1
+
+        return Handler

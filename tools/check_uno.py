@@ -1,12 +1,10 @@
-"""Find out why the Pi doesn't see the Arduino Uno (cabin air sensors).
+"""Find out why the Pi does not see the Arduino Uno.
 
-Run on the Pi with the Uno plugged in by USB - and the DriverGuardian app
-stopped (only one program can use the port):
-    python tools/check_uno.py              # search every USB serial port
-    python tools/check_uno.py /dev/ttyUSB0 # check one port
-It lists the serial ports, checks permissions, opens each likely port, and
-prints what the board says for a few seconds.
+    python tools/check_uno.py
+
+Lists the serial ports, checks permissions, and talks to the Uno like the app does.
 """
+
 import glob
 import grp
 import os
@@ -23,7 +21,7 @@ except ImportError:
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app import config  # noqa: E402
-from app.arduino import _VIDS, parse_line  # noqa: E402
+from app.outputs.arduino import _VIDS, parse_line  # noqa: E402
 
 
 def main():
@@ -95,7 +93,7 @@ def main():
             if config.ARDUINO_PORT not in ("auto", path):
                 print(f"  !! but ARDUINO_PORT is set to {config.ARDUINO_PORT!r} - set it to 'auto' or {path!r}")
         elif lines:
-            print("  The board talks, but not the DriverGuardian way: flash arduino/DriverGuardian_Uno, 115200 baud.")
+            print("  The board talks, but not the DriverGuardian way: flash firmware/uno/DriverGuardian_Uno, 115200 baud.")
         else:
             print("  Silence. Wrong port, wrong baud rate, the sketch isn't flashed, or another program holds the port.")
 

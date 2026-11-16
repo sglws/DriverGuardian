@@ -1,31 +1,16 @@
 [Unit]
-# Runs as a systemd --user service (see README "Run at boot") so it starts
-# inside the desktop auto-login session and inherits DISPLAY/XAUTHORITY
-# correctly - a system-level unit would need those set manually and is
-# more prone to fighting the GUI session for camera/display access.
+# A user service, so it starts inside the desktop session (camera, audio, Bluetooth speaker).
 Description=DriverGuardian driver monitoring system
 After=graphical-session.target
 Wants=graphical-session.target
 
 [Service]
 Type=simple
-# EDIT this to wherever you cloned the repo on the Pi:
 WorkingDirectory=%h/DriverGuardian
 ExecStart=%h/DriverGuardian/.venv/bin/python -m app.main
 Restart=on-failure
 RestartSec=5
-# Only the app itself should ever hold the ESP32 Bluetooth connection (see
-# README) - restarting on failure keeps that true even if it crashes,
-# instead of leaving driver monitoring silently dead until next reboot.
 
 [Install]
-# default.target, NOT graphical-session.target: the latter is activated by
-# the desktop session manager itself and is not a valid install target for
-# user units - `systemctl --user enable` appears to succeed against it but
-# creates no working hook, leaving the service permanently "disabled" and
-# silently never starting at boot (confirmed: is-enabled reported
-# "disabled" after enabling). default.target is the standard install
-# target for user services. graphical-session.target is still referenced
-# in [Unit] above, where After=/Wants= are legitimate - that's ordering,
-# not installation.
+# default.target: graphical-session.target is not a valid install target for user units.
 WantedBy=default.target

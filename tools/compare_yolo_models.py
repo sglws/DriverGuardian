@@ -1,40 +1,11 @@
-"""Compare YOLO models on the same frames.
+"""Compare 2+ YOLO models on the same frames (live camera, a video or images).
 
-Two uses:
+    python tools/compare_yolo_models.py --models main 3nov
 
-1. Different trained models (e.g. 22 Oct on main vs 29 Oct vs 30 Oct), taken
-   straight from their git branches - nothing to copy to the Pi:
-       python tools/compare_yolo_models.py --models main 29oct 30oct
-   A model can also be a folder holding an NCNN export (or a best.pt):
-       python tools/compare_yolo_models.py --models main ~/old_models/best_ncnn_model
-   Branches must be fetched first (git fetch); origin/<branch> works too.
-
-2. Without --models: the square model against the 16:9 export of the same
-   weights (models/best_384x640_ncnn_model, config.YOLO_USE_16X9_MODEL), which
-   does ~40% less work per inference - check they detect the same things
-   before switching.
-
-Every model sees the same frames, prepared exactly the way the app prepares
-them (downscaled to 640 px wide), and its results go through the app's own
-per-class thresholds and mouth rule - so a "detection" here means the same
-thing as in the app (before the 2-of-3 confirmation).
-
-Stop the app first (the camera can only be opened by one program).
-
-Usage (on the Pi, in front of the camera):
-    python tools/compare_yolo_models.py --models main 30oct              # 60 s live
-    python tools/compare_yolo_models.py --models main 30oct --seconds 120
-    python tools/compare_yolo_models.py --models main 30oct --video clip.mp4
-    python tools/compare_yolo_models.py --models main 30oct --images some/folder
-    add --16x9 to compare the branches' 384x640 exports instead of the square ones
-
-During a live run, show everything the model knows: hold a phone, drink from
-a cup/bottle, eat something, hold a cigarette (or a pen like one), seatbelt on
-and off. Frames where the models disagree are saved to
-logs/model_compare_<time>/, named after who saw what, e.g.
-00123_seatbelt-main.jpg = only main saw a seatbelt there. Those frames show
-where a model fails, and are good images to add to the dataset.
+A model is a git branch (its models/best_ncnn_model) or a model folder. Frames where
+the models disagree are saved to logs/ so you can see which one was right.
 """
+
 import argparse
 import glob
 import os
@@ -50,8 +21,6 @@ from app import config  # noqa: E402
 
 ROOT = config.BASE_DIR
 CLASSES = ("phone", "consumption", "cigarette", "seatbelt")
-SQUARE = ("square", os.path.join(config.MODELS_DIR, "best_ncnn_model"), 640)
-RECT = ("16x9", os.path.join(config.MODELS_DIR, "best_384x640_ncnn_model"), (384, 640))
 
 
 def _git(*args):
@@ -80,40 +49,31 @@ def from_branch(branch, sub):
     return out
 
 
-def resolve(spec, rect):
-    """'main' / '30oct' -> that branch's export; a folder or .pt path -> itself."""
-    sub, imgsz = ("best_384x640_ncnn_model", (384, 640)) if rect else ("best_ncnn_model", 640)
+def resolve(spec):
+    """'main' / '3nov' -> that branch's NCNN export; a folder or .pt path -> itself."""
     path = os.path.expanduser(spec)
     if os.path.exists(path):
-        return os.path.basename(os.path.normpath(path)), path, imgsz
-    return spec, from_branch(spec, sub), imgsz
+        return os.path.basename(os.path.normpath(path)), path
+    return spec, from_branch(spec, "best_ncnn_model")
 
 
-def load(path, imgsz):
-    from app.yolo_detector import YoloDetector, _load_backends
-    _load_backends()
-    det = YoloDetector.__new__(YoloDetector)        # same detect() logic as the app
-    from app import yolo_detector
-    det.model = yolo_detector.YOLO(path, task="detect")
-    det.using_finetuned = True
-    det.class_names = det.model.names
-    det.imgsz = imgsz
+def load(path):
+    """A YoloDetector (same detect() as the app) running the model at `path`."""
+    from ultralytics import YOLO
+    from app.vision.yolo_detector import YoloDetector
+    det = YoloDetector.__new__(YoloDetector)
+    det.model = YOLO(path, task="detect")
     return det
 
 
 def run_detector(det, frame):
-    old = config.YOLO_IMG_SIZE
-    config.YOLO_IMG_SIZE = det.imgsz
-    try:
-        t = time.perf_counter()
-        r = det.detect(frame)
-        return r, (time.perf_counter() - t) * 1000
-    finally:
-        config.YOLO_IMG_SIZE = old
+    t = time.perf_counter()
+    r = det.detect(frame)
+    return r, (time.perf_counter() - t) * 1000
 
 
 def flags(result):
-    """Per-class 'detected' exactly as the app counts it (before K-of-N voting)."""
+    """Per-class 'detected' as the app counts it (before the 2-of-3 confirmation)."""
     return {
         "phone": bool(result["phone"]),
         "consumption": bool(result["consumption"]),
@@ -146,7 +106,7 @@ def frames(args):
             if n % args.every == 0:
                 yield img
     else:
-        from app.camera import Camera
+        from app.vision.camera import Camera
         cam = Camera()
         try:
             end = time.monotonic() + args.seconds
@@ -162,11 +122,8 @@ def frames(args):
 
 def main():
     ap = argparse.ArgumentParser(description="Compare YOLO models on the same frames.")
-    ap.add_argument("--models", nargs="+", metavar="BRANCH_OR_PATH",
-                    help="2 or more git branches (main, 29oct, ...) or model folders; "
-                         "default: square vs 16:9 export of models/")
-    ap.add_argument("--16x9", dest="rect", action="store_true",
-                    help="with --models: use the branches' 384x640 exports")
+    ap.add_argument("--models", nargs="+", metavar="BRANCH_OR_PATH", required=True,
+                    help="2 or more git branches (main, 3nov, ...) or model folders")
     src = ap.add_mutually_exclusive_group()
     src.add_argument("--video", help="video file instead of the camera")
     src.add_argument("--images", help="folder of images instead of the camera")
@@ -174,36 +131,30 @@ def main():
     ap.add_argument("--every", type=int, default=3, help="video: use every Nth frame (default 3)")
     args = ap.parse_args()
 
-    if args.models:
-        if len(args.models) < 2:
-            sys.exit("Give at least 2 models to compare.")
-        specs = [resolve(m, args.rect) for m in args.models]
-    else:
-        specs = [SQUARE, RECT]
-        for _, path, _ in specs:
-            if not os.path.isdir(path):
-                sys.exit(f"Missing model: {path}")
+    if len(args.models) < 2:
+        sys.exit("Give at least 2 models to compare.")
+    specs = [resolve(m) for m in args.models]
     names = [s[0] for s in specs]
     if len(set(names)) < len(names):
         sys.exit(f"Two models have the same name: {names}")
-    print("Loading " + ", ".join(f"{n} ({p})" for n, p, _ in specs) + "...")
-    dets = [load(p, s) for _, p, s in specs]
+    print("Loading " + ", ".join(f"{n} ({p})" for n, p in specs) + "...")
+    dets = [load(p) for _, p in specs]
     out_dir = os.path.join(config.LOGS_DIR, f"model_compare_{time.strftime('%Y%m%d_%H%M%S')}")
 
     n, saved = 0, 0
-    count = {c: [0] * len(dets) for c in CLASSES}          # frames each model detected c in
-    agree = {c: 0 for c in CLASSES}                         # frames where all models gave the same answer
-    confs = {c: [[] for _ in dets] for c in CLASSES}       # confidence on frames all models detected c
+    count = {c: [0] * len(dets) for c in CLASSES}
+    agree = {c: 0 for c in CLASSES}
+    confs = {c: [[] for _ in dets] for c in CLASSES}
     times = [[] for _ in dets]
     for frame in frames(args):
         h, w = frame.shape[:2]
-        if w > 640:                                         # same as YoloProcess.submit()
+        if w > 640:
             frame = cv2.resize(frame, (640, round(h * 640 / w)), interpolation=cv2.INTER_AREA)
         results = []
         for i, det in enumerate(dets):
             r, ms = run_detector(det, frame)
             results.append(r)
-            if n >= 2:                                      # skip warm-up timings
+            if n >= 2:
                 times[i].append(ms)
         fl = [flags(r) for r in results]
         disagree = []
@@ -248,15 +199,9 @@ def main():
     covered = [c for c in CLASSES if any(count[c])]
     print(f"\nClasses seen: {', '.join(covered) or 'none'}"
           + ("" if len(covered) == len(CLASSES) else f"  (not tested: {', '.join(c for c in CLASSES if c not in covered)})"))
-    if args.models:
-        print(f"Lowest per-class agreement: {worst:.1f}%")
-        print("Who is right? Count is not accuracy - more seatbelt frames is better only if the belt was on.\n"
-              "Look at the saved frames: each one shows what you were really doing.")
-    else:
-        verdict = "EQUIVALENT - safe to switch" if worst >= 95 and covered else \
-                  "CHECK the saved frames before switching" if covered else "INCONCLUSIVE - nothing was detected"
-        print(f"Lowest per-class agreement: {worst:.1f}%  ->  {verdict}")
-        print("(Switch with YOLO_USE_16X9_MODEL = True in app/config.py, or DG_16X9=1 for one run.)")
+    print(f"Lowest per-class agreement: {worst:.1f}%")
+    print("Who is right? Count is not accuracy - more seatbelt frames is better only if the belt was on.\n"
+          "Look at the saved frames: each one shows what you were really doing.")
 
 
 if __name__ == "__main__":

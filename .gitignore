@@ -1,70 +1,30 @@
-# --- Python ---
+# Python
 __pycache__/
 *.py[cod]
-*$py.class
-*.so
-build/
-dist/
-*.egg-info/
-
-# --- Virtual environment ---
 .venv/
 venv/
-env/
 
-# --- IDE / OS ---
+# Editors and OS
 .vscode/
 .idea/
 .DS_Store
-Thumbs.db
 
-# --- Runtime artifacts (regenerated every run, not useful in history) ---
-logs/*.csv
-logs/compare_models/
-logs/model_compare_*/
+# Created while running (logs, voice cache, session database)
+logs/
 assets/voice_cache/
-outputs/*
-!outputs/.gitkeep
-
-# --- Training artifacts (large, fully regenerable from the dataset) ---
-training/runs/
-
-# --- Dataset images/labels: can grow to thousands of files (Phase 9-10) -
-# use Roboflow/DVC/Git LFS for these instead of committing raw data. Keep
-# the folder structure and data.yaml tracked.
-datasets/train/images/*
-datasets/train/labels/*
-datasets/valid/images/*
-datasets/valid/labels/*
-datasets/test/images/*
-datasets/test/labels/*
-!datasets/**/.gitkeep
-
-# --- Model weights: keep the small pretrained baseline and the current
-# deployed fine-tuned model - the dataset that trained best.pt isn't in this
-# repo (see datasets/ rules above), so it's not actually regenerable from
-# what's here; committing it (it's small, ~5MB) is what keeps a fresh clone
-# actually functional. Ignore other/future .pt files (retraining experiments,
-# checkpoints) so those don't get committed by accident. ---
-models/*.pt
-!models/yolo11n.pt
-!models/best.pt
-
-# ESP32 firmware sketches - kept out of git
-esp32/
-
-# Project documents (requirements, reports, plots) - kept out of git
-documents/
-
-# CSC423 report package (docs, PlantUML diagrams, generated report) - kept out of git
-docs/
-diagrams/
-
-# Piper voice models (~60-120 MB each) - download with tools/get_piper_voice.py
-models/piper/
-
-# Session history database (local test records)
 data/
 
-# Trained model downloads (best*.zip / .pt) - the installed copy lives in models/
-datasets/model_zips/
+# Training: runs and the dataset (Roboflow export) stay local
+training/runs/
+dataset/
+datasets/
+
+# Models: only best.pt and its NCNN export are tracked
+models/*.pt
+!models/best.pt
+models/piper/
+
+# Documents and report files stay local
+documents/
+docs/
+diagrams/

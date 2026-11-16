@@ -1,13 +1,8 @@
-"""Download a Piper voice into models/piper/ (resumes and retries on a flaky
-connection). The app uses the voice named in config.VOICE_PIPER_VOICE.
+"""Download a Piper voice into models/piper/ (resumes on a flaky connection).
 
-Usage:
-    python tools/get_piper_voice.py                       # the configured voice
-    python tools/get_piper_voice.py en_US-amy-medium      # another voice
-
-Voice names: https://huggingface.co/rhasspy/piper-voices (en/en_US/...).
-Needs: pip install piper-tts
+    python tools/get_piper_voice.py [voice]     (default: config.VOICE_PIPER_VOICE)
 """
+
 import os
 import ssl
 import sys
@@ -20,7 +15,7 @@ from app import config  # noqa: E402
 
 BASE = "https://huggingface.co/rhasspy/piper-voices/resolve/main"
 
-try:   # some Python installs (e.g. python.org on macOS) ship without CA certificates
+try:
     import certifi
     _SSL = ssl.create_default_context(cafile=certifi.where())
 except ImportError:
@@ -28,7 +23,7 @@ except ImportError:
 
 
 def url_for(voice: str, ext: str) -> str:
-    lang_region, name, quality = voice.split("-", 2)      # en_US, lessac, medium
+    lang_region, name, quality = voice.split("-", 2)
     lang = lang_region.split("_")[0]
     return f"{BASE}/{lang}/{lang_region}/{name}/{quality}/{voice}.{ext}"
 
@@ -40,7 +35,7 @@ def download(url: str, dest: str, attempts: int = 30):
         try:
             with urllib.request.urlopen(req, timeout=30, context=_SSL) as r:
                 total = have + int(r.headers.get("Content-Length", 0))
-                if have and r.status != 206:      # server ignored the range: start over
+                if have and r.status != 206:
                     have, total = 0, int(r.headers.get("Content-Length", 0))
                 with open(dest, "ab" if have else "wb") as f:
                     while chunk := r.read(1 << 16):
@@ -50,7 +45,7 @@ def download(url: str, dest: str, attempts: int = 30):
             print()
             return
         except urllib.error.HTTPError as e:
-            if e.code == 416:                     # already complete
+            if e.code == 416:
                 print(f"  {os.path.basename(dest)}: already complete")
                 return
             raise

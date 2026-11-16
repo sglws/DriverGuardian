@@ -1,14 +1,6 @@
-"""
-plot_latency.py
----------------
-Turns the per-sample CSV from bt_latency_benchmark.py into a report figure:
-a histogram (shape of the distribution) beside a CDF (share of round trips
-completed within X ms), with median / p95 / p99 marked on both.
+"""Report figure from bt_latency_benchmark.py: histogram and CDF, with median, p95 and p99.
 
-Usage (on the laptop - matplotlib isn't needed on the Pi):
-    scp dms@pi5:~/DriverGuardian/bt_latency_samples.csv .
-    python tools/plot_latency.py bt_latency_samples.csv
-    -> bt_latency.png (300 dpi) and bt_latency.pdf (vector, best for a report)
+    python tools/plot_latency.py [csv]
 """
 
 import argparse
@@ -20,13 +12,12 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.ticker import PercentFormatter
 
-# Light-mode roles from the reference palette - a printed report is light.
 SURFACE = "#fcfcfb"
-SERIES = "#2a78d6"          # single series, so one hue and no legend box
+SERIES = "#2a78d6"
 TEXT_PRIMARY = "#0b0b0b"
 TEXT_SECONDARY = "#52514e"
-MUTED = "#898781"           # axis ticks/labels
-GRID = "#e1e0d9"            # hairline, solid
+MUTED = "#898781"
+GRID = "#e1e0d9"
 BASELINE = "#c3c2b7"
 
 
@@ -39,8 +30,6 @@ def load(path):
 
 
 def nearest_rank(sorted_vals, p):
-    # Same definition as bt_latency_benchmark.py, so the figure and the
-    # printed report agree to the digit.
     k = max(1, int(round(p / 100.0 * len(sorted_vals))))
     return sorted_vals[k - 1]
 
@@ -58,8 +47,7 @@ def style_axes(ax):
 
 
 def mark_lines(ax, marks, top):
-    """Histogram: thin muted reference lines (recessive - the bars are the
-    data), each labelled at its own height so p95/p99 never collide."""
+    """Histogram: thin muted reference lines (recessive - the bars are the data), each labelled at its own height so p95/p99 never collide."""
     for i, (label, x, _) in enumerate(marks):
         ax.axvline(x, color=MUTED, linewidth=0.9, zorder=1)
         ax.annotate(f"{label} {x:.1f} ms", xy=(x, top * (0.96 - 0.14 * i)),
@@ -69,9 +57,7 @@ def mark_lines(ax, marks, top):
 
 
 def mark_points(ax, marks):
-    """CDF: each percentile IS a point on the curve (x = time, y = share), so
-    mark it there with a surface-ringed dot. p95 and p99 are only 4 points
-    apart vertically, so their labels go below and above respectively."""
+    """CDF: each percentile IS a point on the curve (x = time, y = share), so mark it there with a surface-ringed dot."""
     offsets = [(10, 0), (10, -11), (10, 9)]
     for (label, x, q), (dx, dy) in zip(marks, offsets):
         ax.plot([x], [q], marker="o", markersize=7, color=SERIES,
@@ -106,10 +92,6 @@ def main():
                                      gridspec_kw={"wspace": 0.28})
     x_max = s[-1] * 1.05
 
-    # --- Histogram: one bar per 1.25 ms Bluetooth frame. Edges are offset half
-    # a frame from the fastest sample, so each quantized cluster sits in the
-    # middle of its own bin rather than straddling an edge (which would split
-    # it across two bars, or leave fake-empty bins). White edge = surface gap.
     w = args.bin_ms
     start = s[0] - w / 2
     nbins = int((s[-1] - start) / w) + 2
@@ -123,7 +105,6 @@ def main():
     ax_h.set_ylabel(f"Samples per {w:g} ms bin" + (" (1 BT frame)" if w == 1.25 else ""), fontsize=9, color=TEXT_SECONDARY)
     mark_lines(ax_h, marks, top=max(counts))
 
-    # --- CDF: share of round trips completed within x ms ---
     ys = [(i + 1) / n for i in range(n)]
     ax_c.step(s, ys, where="post", color=SERIES, linewidth=2, zorder=2)
     style_axes(ax_c)
