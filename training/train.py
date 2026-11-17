@@ -41,7 +41,7 @@ def main():
     model.train(
         data=str(DATA), name=NAME,
         epochs=150,
-        patience=150,          # no early stop, so the last 20 epochs without mosaic always run
+        patience=20,         
         cos_lr=True,
         close_mosaic=20,       # whole images at the end help the long, thin seatbelt
         imgsz=640,
